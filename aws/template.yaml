@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless paper-trading bot. EventBridge schedules -> signal Lambda
+  (Alpaca data -> strategy signals -> DynamoDB targets) -> executor Lambda
+  (reconcile Alpaca paper positions to targets). Secrets live in SSM.
+
+Parameters:
+  PandasLayerArn:
+    Type: String
+    Default: arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312:24
+    Description: >
+      AWS SDK for pandas managed layer for YOUR region + python3.12. Find
+      your region's current ARN at
+      https://aws-sdk-pandas.readthedocs.io/en/stable/layers.html
+  Watchlist:
+    Type: String
+    Default: MU
+    Description: >
+      User-selected ticker universe, stored in SSM at /trading-bot/watchlist.
+      Changing the universe requires a new ExperimentId and deployment.
+  BookBudgetUsd:
+    Type: String
+    Default: '12000'
+    Description: Equal initial shadow book budget, including cash.
+  ExperimentId:
+    Type: String
+    Default: cash-v2-20260911
+    AllowedPattern: '[A-Za-z0-9_-]+'
+    Description: New ID starts a fresh comparison while retaining past records.
+  CostBps:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    MaxValue: 100
+  DryRun:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: When true, the executor logs intended orders but places none.
+  MaxOrderUsd:
+    Type: String
+    Default: '5000'
+    Description: Refuse any single order whose notional exceeds this.
+  SignalSchedule:
+    Type: String
+    Default: cron(40 15 ? * MON-FRI *)
+    Description: 3:40pm America/New_York weekdays, DST aware.
+  ExecutorSchedule:
+    Type: String
+    Default: cron(45 15 ? * MON-FRI *)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 512
+    Timeout: 180
+    Layers:
+      - !Ref PandasLayerArn
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref StateTable
+        WATCHLIST_PARAM: /trading-bot/watchlist
+        ALPACA_KEY_PARAM: /trading-bot/alpaca/key_id
+        ALPACA_SECRET_PARAM: /trading-bot/alpaca/secret
+        EXPERIMENT_ID: !Ref ExperimentId
+        BOOK_BUDGET_USD: !Ref BookBudgetUsd
+        COST_BPS: !Ref CostBps
+
+Resources:
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  WatchlistParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /trading-bot/watchlist
+      Type: String
+      Value: !Ref Watchlist
+      Description: Tickers the bot may trade. The halal universe gate.
+
+  SignalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: signal_handler.lambda_handler
+      Description: Publish a complete daily batch of strategy target weights.
+      Environment:
+        Variables:
+          BOOK_BUDGET_USD: !Ref BookBudgetUsd
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trading-bot/*
+      Events:
+        LocalSession:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: !Ref SignalSchedule
+            ScheduleExpressionTimezone: America/New_York
+            FlexibleTimeWindow:
+              Mode: 'OFF'
+            State: ENABLED
+
+  ExecutorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: executor_handler.lambda_handler
+      Description: Reconcile Alpaca paper positions to aggregated targets.
+      Environment:
+        Variables:
+          DRY_RUN: !Ref DryRun
+          MAX_ORDER_USD: !Ref MaxOrderUsd
+          MAX_SIGNAL_AGE_MIN: '360'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trading-bot/*
+      Events:
+        LocalSession:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: !Ref ExecutorSchedule
+            ScheduleExpressionTimezone: America/New_York
+            FlexibleTimeWindow:
+              Mode: 'OFF'
+            State: ENABLED
+
+  ReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: reporter_handler.lambda_handler
+      Description: Mark strategy books to market and publish dashboard data.json.
+      Environment:
+        Variables:
+          DASHBOARD_BUCKET: !Ref DashboardBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        - S3CrudPolicy:
+            BucketName: !Ref DashboardBucket
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/trading-bot/*
+      Events:
+        LocalSession:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(15 17 ? * MON-FRI *)
+            ScheduleExpressionTimezone: America/New_York
+            FlexibleTimeWindow:
+              Mode: 'OFF'
+            State: ENABLED
+
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  DashboardOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-dashboard-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DashboardDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Trading bot dashboard
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        Origins:
+          - Id: dashboard-s3
+            DomainName: !GetAtt DashboardBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt DashboardOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: dashboard-s3
+          ViewerProtocolPolicy: redirect-to-https
+          # Managed policy: CachingOptimized
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CacheBehaviors:
+          - PathPattern: data.json
+            TargetOriginId: dashboard-s3
+            ViewerProtocolPolicy: redirect-to-https
+            # Managed policy: CachingDisabled (always fresh numbers)
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${DashboardBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}
+
+Outputs:
+  StateTableName:
+    Value: !Ref StateTable
+  SignalFunctionName:
+    Value: !Ref SignalFunction
+  ExecutorFunctionName:
+    Value: !Ref ExecutorFunction
+  ReporterFunctionName:
+    Value: !Ref ReporterFunction
+  DashboardBucketName:
+    Value: !Ref DashboardBucket
+  DashboardDistributionId:
+    Value: !Ref DashboardDistribution
+  DashboardURL:
+    Value: !Sub https://${DashboardDistribution.DomainName}

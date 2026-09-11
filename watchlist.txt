@@ -1,0 +1,15 @@
+# Trading universe — the bot may ONLY trade tickers listed here.
+# Source: halal.sh triple-screened US list (your filters).
+# Refresh periodically: compliance status changes as company financials change.
+MU
+TSM
+WELL
+COP
+NEM
+SCCO
+FCX
+AEM
+CNQ
+CEG
+PSX
+SLB

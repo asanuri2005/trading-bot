@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+node_modules/
+dist/
+.aws-sam/
+output/
+aws/samconfig.toml
+models/candidates/
+review-backup-*.zip
+*.log
+.DS_Store

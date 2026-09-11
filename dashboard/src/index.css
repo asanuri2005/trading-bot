@@ -1,0 +1,182 @@
+/* Paper Ledger — design tokens
+   Several books race; each owns a color. Everything else stays quiet. */
+:root {
+  --ink: #0f1620;
+  --panel: #161f2b;
+  --panel-2: #121a25;
+  --line: #263344;
+  --text: #e9edf2;
+  --muted: #8b98a9;
+  /* Accents for chrome (badge, focus ring). The chart's own six series
+     colours live in App.jsx, keyed by book name — see SERIES_COLORS. */
+  --book-a: #3987e5;
+  --book-b: #d95926;
+  --pos: #58c48a;
+  --neg: #e0685c;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.wrap { max-width: 1060px; margin: 0 auto; padding: 28px 20px 64px; }
+
+/* ---------------------------------------------------------- header */
+.masthead {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 22px;
+}
+.eyebrow {
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--muted);
+}
+.wordmark { font-family: var(--mono); font-weight: 600; font-size: 22px; margin: 2px 0 0; }
+.meta { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+.meta strong { color: var(--text); font-weight: 500; }
+
+.badge {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.08em; padding: 2px 8px; border-radius: 3px;
+  border: 1px solid var(--line); color: var(--muted); margin-left: 8px;
+}
+.badge.sample { border-color: var(--book-a); color: var(--book-a); }
+
+/* ------------------------------------------------------ book cards */
+/* Fits however many books are in the lineup — two side by side, six as a
+   3x2 grid — without hardcoding the count. */
+.books {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px; margin-bottom: 14px;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 18px 20px;
+}
+.book { border-top: 3px solid var(--book-color, var(--line)); }
+.book h2 {
+  font-family: var(--mono); font-size: 13px; font-weight: 500;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--book-color); margin: 0 0 10px;
+}
+.big {
+  font-family: var(--mono); font-size: 34px; font-weight: 600;
+  letter-spacing: -0.01em; margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.delta {
+  font-family: var(--mono); font-size: 13px; margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+.flat { color: var(--muted); }
+.holdings { margin-top: 14px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.holdings span { color: var(--text); }
+
+/* ----------------------------------------------------------- chart */
+.chart-card { margin-bottom: 14px; }
+.chart-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.chart-title { font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--muted); }
+.scoreline { font-family: var(--mono); font-size: 14px; font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------- tables */
+.grid-2 { display: grid; grid-template-columns: 1fr 1.2fr; gap: 14px; }
+table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+caption {
+  text-align: left; font-family: var(--mono); font-size: 13px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+  padding-bottom: 10px;
+}
+th {
+  text-align: left; font-weight: 500; color: var(--muted); font-size: 11px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  border-bottom: 1px solid var(--line); padding: 0 8px 6px;
+}
+td { padding: 7px 8px; border-bottom: 1px solid var(--panel-2);
+  font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.num { text-align: right; }
+.tag {
+  display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 11px;
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.tag.buy { background: rgba(88, 196, 138, 0.14); color: var(--pos); }
+.tag.sell { background: rgba(224, 104, 92, 0.14); color: var(--neg); }
+.tag.long { background: rgba(233, 237, 242, 0.08); color: var(--text); }
+.tag.flatpos { color: var(--muted); border: 1px solid var(--line); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 8px; }
+
+/* ------------------------------------------------------ empty state */
+.empty {
+  padding: 36px 20px; text-align: center; color: var(--muted);
+  font-family: var(--mono); font-size: 13px;
+}
+.empty strong { color: var(--text); display: block; margin-bottom: 6px; font-weight: 500; }
+
+footer { margin-top: 26px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+:focus-visible { outline: 2px solid var(--book-b); outline-offset: 2px; }
+
+@media (max-width: 760px) {
+  .books, .grid-2 { grid-template-columns: 1fr; }
+  .big { font-size: 28px; }
+  .meta { text-align: left; }
+}
+
+/* Chart legend — required once the race runs more than a couple of books:
+   colour alone stops being a usable key past three or four lines. */
+.legend {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 14px 0 2px;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend li { display: flex; align-items: center; gap: 7px; }
+.legend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+
+/* Return leads on each card; the dollar figure is context beneath it. */
+.subline {
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  margin-top: 3px; font-variant-numeric: tabular-nums;
+}
+
+.comparison-note { padding: 18px 22px; margin: 18px 0; }
+.comparison-note p { color: var(--muted); margin: 6px 0; }
+@media (max-width: 720px) {
+  .chart-head, .chart-tools { flex-wrap: wrap; gap: 10px; }
+}
+
+/* Metric toggle (% / $) beside the scoreline. */
+.chart-tools { display: flex; align-items: center; gap: 14px; }
+.toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.toggle button {
+  font-family: var(--mono); font-size: 12px; line-height: 1;
+  padding: 5px 11px; border: 0; cursor: pointer;
+  background: transparent; color: var(--muted);
+}
+.toggle button.on { background: var(--line); color: var(--text); }
+.toggle button:not(.on):hover { color: var(--text); }
