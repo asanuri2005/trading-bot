@@ -77,6 +77,9 @@ class Broker:
     def latest_trade(self, symbol):
         return dict(p=20, t=dt.datetime.now(dt.timezone.utc).isoformat())
 
+    def asset(self, symbol):
+        return dict(symbol=symbol, status="active", tradable=True)
+
     def open_orders(self):
         return [o for o in self.orders if o["status"] in {"new", "partially_filled"}]
 
@@ -244,6 +247,94 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(exp.acquire_executor(self.table))
         exp.release_executor(self.table, replacement)
         self.assertTrue(self.execute()["dry_run"])
+
+    def test_reporter_refreshes_fills_that_complete_after_execution(self):
+        self.signal()
+        self.broker.fill = "partially_filled"
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            self.execute()
+        count = len(self.broker.orders)
+        for order in self.broker.orders:
+            order.update(status="filled", filled_qty=order["qty"], filled_avg_price="20.15")
+        reporter_handler.lambda_handler({}, None)
+        data = json.loads(self.objects["data.json"])
+        self.assertTrue(data["orders_refreshed"])
+        self.assertEqual(len(data["trades"]), count)
+        self.assertTrue(all(t["status"] == "filled" and t["filled_qty"] == t["qty"] and t["price"] == 20.15 for t in data["trades"]))
+        self.assertEqual(len(self.broker.orders), count)
+        self.assertFalse(state.pending_trades(self.table))
+
+    def test_reporter_respects_executor_lease(self):
+        self.signal()
+        owner = exp.acquire_executor(self.table)
+        with patch.object(state, "refresh_orders") as refresh:
+            reporter_handler.lambda_handler({}, None)
+            refresh.assert_not_called()
+        self.assertFalse(json.loads(self.objects["data.json"])["orders_refreshed"])
+        self.assertIsNone(exp.acquire_executor(self.table))
+        exp.release_executor(self.table, owner)
+        reporter_handler.lambda_handler({}, None)
+        self.assertTrue(json.loads(self.objects["data.json"])["orders_refreshed"])
+
+    def test_order_refresh_failure_keeps_ledger_and_flags_stale_orders(self):
+        self.signal()
+        with patch.object(state, "refresh_orders", side_effect=TimeoutError("broker unavailable")):
+            reporter_handler.lambda_handler({}, None)
+        data = json.loads(self.objects["data.json"])
+        self.assertFalse(data["orders_refreshed"])
+        self.assertEqual(len(data["strategies"]), 7)
+        owner = exp.acquire_executor(self.table)
+        self.assertIsNotNone(owner)
+        exp.release_executor(self.table, owner)
+
+    def test_suspended_account_and_untradable_asset_place_no_orders(self):
+        self.signal()
+        account = dict(self.broker.account(), trade_suspended_by_user=True)
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            with patch.object(self.broker, "account", return_value=account):
+                self.assertIn("account", self.execute()["skipped"])
+            with patch.object(self.broker, "asset", return_value={"status": "inactive", "tradable": False}):
+                self.assertIn("asset", self.execute()["skipped"])
+        self.assertFalse(self.broker.orders)
+
+    def test_unmanaged_positions_are_not_adopted_or_liquidated(self):
+        self.signal()
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            for symbol in ["A", "OUTSIDE"]:
+                with self.subTest(symbol=symbol):
+                    self.broker.pos = {symbol: 10}
+                    self.assertIn("unmanaged", self.execute()["skipped"])
+        self.assertFalse(self.broker.orders)
+        self.assertFalse(state.get_bot_symbols(self.table))
+
+    def test_live_endpoint_and_stale_quotes_block_orders(self):
+        self.signal()
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            with patch.object(self.broker, "trading_base", "https://api.alpaca.markets", create=True):
+                with self.assertRaisesRegex(ValueError, "paper-only"):
+                    self.execute()
+            with patch.object(self.broker, "latest_trade", return_value={"p": 20, "t": "2020-01-01T00:00:00Z"}):
+                self.assertIn("stale execution price", self.execute()["skipped"])
+        self.assertFalse(self.broker.orders)
+
+    def test_sales_do_not_fund_buys_within_the_same_invocation(self):
+        self.signal()
+        self.broker.pos = {"A": 2000}
+        self.broker.cash = 1
+        state.put_bot_position(self.table, "A", 2000, "2026-08-10")
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            result = self.execute()
+        self.assertTrue(self.broker.orders)
+        self.assertTrue(all(o["side"] == "sell" for o in self.broker.orders))
+        self.assertTrue(any(a.get("blocked") == "insufficient unreserved cash" for a in result["actions"]))
+
+    def test_mismatched_saved_plan_is_rejected(self):
+        self.signal()
+        exp.put_once(self.table, "PLAN", exp.today(), {"run_id": "wrong", "desired": {"A": 5}})
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            with self.assertRaisesRegex(ValueError, "saved plan"):
+                self.execute()
+        self.assertFalse(self.broker.orders)
 
 
 if __name__ == "__main__":

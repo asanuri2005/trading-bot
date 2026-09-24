@@ -261,9 +261,12 @@ function TargetsTable({ targets }) {
   );
 }
 
-function TradesTable({ trades }) {
+function TradesTable({ trades, refreshed }) {
   return (
     <section className="card">
+      {refreshed === false && (
+        <p role="status">Order status could not be refreshed. Showing the last saved update.</p>
+      )}
       <table>
         <caption>Broker orders (separate from simulated books)</caption>
         <thead>
@@ -462,7 +465,7 @@ export default function App() {
 
           <div className="grid-2">
             <TargetsTable targets={data.targets || []} />
-            <TradesTable trades={data.trades || []} />
+            <TradesTable trades={data.trades || []} refreshed={data.orders_refreshed} />
           </div>
 
           <footer>

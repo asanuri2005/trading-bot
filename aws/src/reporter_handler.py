@@ -69,13 +69,28 @@ def lambda_handler(event, context):
         account = {"equity": float(alpaca.account()["equity"])}
     except Exception:
         account = {"equity": None, "unavailable": True}
+    # Orders may finish after the 15:45 executor returns. Refresh their
+    # confirmed fills before publishing, including recovered HTTP responses.
+    # The shared lease protects order records; no orders are submitted here.
+    orders_refreshed = False
+    remaining = context.get_remaining_time_in_millis()/1000 if context else 180
+    owner = exp.acquire_executor(table, duration=max(300, int(remaining)+61))
+    if owner:
+        try:
+            state.refresh_orders(alpaca, table)
+            orders_refreshed = True
+        except Exception as exc:
+            print(json.dumps({"event": "order_refresh_failed", "error_type": type(exc).__name__}))
+        finally:
+            exp.release_executor(table, owner)
     trades = state.get_trades(table)
     data = dict(schema_version=2, experiment_id=exp.experiment_id(),
                 start_date=records[0]["date"], as_of=latest["date"],
                 generated_at=dt.datetime.now(dt.timezone.utc).isoformat(),
                 accounting="shadow_cash_inclusive", cost_bps=latest["config"]["cost_bps"],
                 book_budget=latest["config"]["budget"], model_hash=latest["config"]["model_hash"],
-                account=account, strategies=reports, targets=latest_run["targets"],
+                account=account, orders_refreshed=orders_refreshed,
+                strategies=reports, targets=latest_run["targets"],
                 trades=[dict(ts=str(t["sk"]), symbol=str(t["symbol"]), side=str(t["side"]),
                              qty=float(t["qty"]), price=float(t.get("filled_avg_price", 0)),
                              filled_qty=float(t.get("filled_qty", 0)), status=str(t.get("status", ""))) for t in trades])

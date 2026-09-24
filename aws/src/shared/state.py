@@ -14,7 +14,7 @@ from decimal import Decimal
 
 
 def _scan_all(table) -> list[dict]:
-    items, kwargs = [], {}
+    items, kwargs = [], {"ConsistentRead": True}
     while True:
         resp = table.scan(**kwargs)
         items += resp.get("Items", [])
@@ -78,6 +78,24 @@ def pending_trades(table):
     terminal = {"filled", "canceled", "expired", "rejected", "replaced"}
     return [i for i in _scan_all(table) if str(i.get("pk", "")).startswith(("ORDER#", "TRADE#"))
             and str(i.get("status", "")) not in terminal and i.get("order_id")]
+
+
+def refresh_orders(alpaca, table):
+    """Refresh confirmed order state without submitting or canceling orders.
+
+    Callers hold the executor lease so a stale response cannot overwrite a
+    newer observation from a concurrent executor/reporter invocation.
+    """
+    for intent in unresolved_intents(table):
+        order = alpaca.order_by_client_id(str(intent["pk"]).split("#", 1)[1])
+        if order:
+            record_trade(table, order["symbol"], order["side"], int(order["qty"]),
+                         order, str(order["submitted_at"]))
+            table.put_item(Item=dict(intent, reconciled=True))
+    for item in pending_trades(table):
+        order = alpaca.order(str(item["order_id"]))
+        record_trade(table, str(item["symbol"]), str(item["side"]), int(item["qty"]),
+                     order, str(item["sk"]), float(item.get("price", 0)))
 
 
 def put_intent(table, client_id, symbol):

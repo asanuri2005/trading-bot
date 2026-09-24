@@ -7,6 +7,9 @@ See [REVIEW_CHANGES.md](REVIEW_CHANGES.md) for current accounting, commands,
 deployment settings and limitations. Research tables below predate the
 evaluation fixes and are retained as historical notes, not fresh validation.
 
+See [PAPER_READINESS.md](PAPER_READINESS.md) for the September 24 operational
+audit, paper-account launch settings, and activation/pause procedure.
+
 Vectorized daily backtester with pluggable strategies. This is the local
 research layer of a larger AWS project (EventBridge → Lambda → DynamoDB →
 Alpaca paper trading → React dashboard → Bedrock sentiment).

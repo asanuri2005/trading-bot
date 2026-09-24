@@ -4,23 +4,14 @@ Pending orders block new submissions. Plans and client IDs survive retries.
 Only confirmed broker positions update BOTPOS; submissions are order records.
 """
 import datetime as dt
+import json
 import math
 
 from shared import experiment as exp, portfolio, runtime, state
 
 
 def reconcile(alpaca, table):
-    # Recover submissions accepted by Alpaca whose HTTP response was lost.
-    for intent in state.unresolved_intents(table):
-        order = alpaca.order_by_client_id(str(intent["pk"]).split("#", 1)[1])
-        if order:
-            state.record_trade(table, order["symbol"], order["side"], int(order["qty"]), order,
-                               str(order["submitted_at"]))
-            table.put_item(Item=dict(intent, reconciled=True))
-    for item in state.pending_trades(table):
-        order = alpaca.order(str(item["order_id"]))
-        state.record_trade(table, str(item["symbol"]), str(item["side"]), int(item["qty"]),
-                           order, str(item["sk"]), float(item.get("price", 0)))
+    state.refresh_orders(alpaca, table)
     positions = {p["symbol"]: float(p["qty"]) for p in alpaca.positions()}
     for symbol in set(state.get_bot_symbols(table)):
         qty = float(positions.get(symbol, 0))
@@ -38,9 +29,13 @@ def lambda_handler(event, context):
     remaining = context.get_remaining_time_in_millis()/1000 if context else 180
     owner = exp.acquire_executor(table, duration=max(300, math.ceil(remaining)+60))
     if owner is None:
-        return {"skipped": "another executor invocation holds the lease"}
+        result = {"skipped": "another executor invocation holds the lease"}
+        print(json.dumps(dict(event="execution_result", **result)))
+        return result
     try:
-        return _execute(event, context)
+        result = _execute(event, context)
+        print(json.dumps(dict(event="execution_result", **result)))
+        return result
     finally:
         exp.release_executor(table, owner)
 
@@ -67,14 +62,21 @@ def _execute(event, context):
     if alpaca.open_orders():
         return {"skipped": "open orders awaiting reconciliation", "dry_run": dry_run}
     account = alpaca.account()
-    if account.get("status") != "ACTIVE" or account.get("trading_blocked") or account.get("account_blocked"):
+    if (account.get("status") != "ACTIVE" or account.get("trading_blocked")
+            or account.get("account_blocked") or account.get("trade_suspended_by_user")):
         return {"skipped": "account not available for trading", "dry_run": dry_run}
+    managed = set(state.get_bot_symbols(table))
+    if any(qty and symbol not in managed for symbol, qty in held.items()):
+        return {"skipped": "unmanaged broker positions; dedicated account required", "dry_run": dry_run}
     cash = min(float(account["cash"]), float(account.get("non_marginable_buying_power", account["cash"])))
     if not math.isfinite(cash) or cash < 0:
         raise ValueError("invalid available cash")
-    symbols = sorted(set(run["config"]["universe"]) | set(state.get_bot_symbols(table)))
+    symbols = sorted(set(run["config"]["universe"]) | managed)
     prices = {}
     for symbol in symbols:
+        asset = alpaca.asset(symbol)
+        if asset.get("status") != "active" or not asset.get("tradable"):
+            return {"skipped": f"asset unavailable for trading: {symbol}", "dry_run": dry_run}
         trade = alpaca.latest_trade(symbol)
         trade_age = (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(str(trade["t"]).replace("Z", "+00:00"))).total_seconds()
         if not portfolio.positive(trade["p"]) or not -5 <= trade_age <= 900:
@@ -84,6 +86,8 @@ def _execute(event, context):
             raise ValueError(f"{symbol}: unsupported broker holding")
     kind = "PREVIEW" if dry_run else "PLAN"
     plan = exp.get(table, kind, date)
+    if plan and plan["run_id"] != run["run_id"]:
+        raise ValueError("saved plan does not match today's signal batch")
     if not plan:
         # B&H reference is monitored in the shadow ledger only. Broker orders
         # execute the six active strategies with equal fixed dollar budgets.

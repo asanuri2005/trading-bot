@@ -104,6 +104,9 @@ class Alpaca:
     def account(self) -> dict:
         return self._request(self.trading_base, "GET", "/v2/account")
 
+    def asset(self, symbol) -> dict:
+        return self._request(self.trading_base, "GET", f"/v2/assets/{symbol}")
+
     def positions(self) -> list[dict]:
         return self._request(self.trading_base, "GET", "/v2/positions")
 
