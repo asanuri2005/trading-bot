@@ -1,8 +1,11 @@
 # Alpaca paper-trading readiness — September 24, 2026
 
-The September 11–23 shadow run passes the operational audit. DryRun is still
-true while the activation change set is prepared. No brokerage orders were
-submitted during the audit.
+The September 11–23 shadow run passes the operational audit. Following user
+approval, **Alpaca paper execution was activated September 24 at approximately
+15:55 New York time**. DryRun=false is deployed and saved in samconfig.toml.
+The first supervised run submitted 12 buys; all 12 filled in the paper account.
+Approximately $47,575.78 was invested, leaving $52,424.22 cash at the first
+post-fill check. No real-money trading endpoint is enabled.
 
 ## Evidence
 
@@ -100,10 +103,23 @@ with every other parameter retained. Inspect the prepared change set, then
 execute it when launching. Verify the executor's deployed DRY_RUN value and
 update `aws/samconfig.toml` to match so a future deploy does not revert it.
 
-Prepared change set: `enable-paper-20260924` (not executed). Detailed order
+Executed activation change set: `enable-paper-20260924`. Detailed pre-launch order
 preview and change-set ARN: `output/review/paper-activation-20260924.json`.
-The readiness fixes are already deployed with DryRun=true. All nine original
+The saved deployment configuration now has DryRun=false. All nine original
 completed sessions remain under `cash-v2-20260911`; nothing was reset.
+
+The first run was invoked manually after the day's scheduled 15:45 dry run.
+Future execution remains scheduled for 15:45 New York time on trading days.
+Broker order/position evidence: `output/review/paper-launch-20260924.json`.
+
+The launch exposed timestamp variation between Alpaca's initial acceptance
+response and subsequent order reads. Timestamp-keyed observations made 12
+broker orders appear as 22 dashboard rows. Order records now use the stable
+broker order ID with a fixed sort key; reads consolidate older observations
+without deleting history. Two regression tests reproduce the issue; all
+34 Python tests pass. Alpaca itself confirmed only the 12 intended orders.
+After deployment, the public dashboard JSON contains exactly 12 filled
+orders; every quantity and average fill price matches Alpaca's response.
 
 The scheduled executor runs at 15:45 New York time. A supervised invocation
 may be used during the open session after a fresh RUN exists. Inspect its

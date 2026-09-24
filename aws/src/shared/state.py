@@ -10,6 +10,7 @@ Scans are fine here: the table holds tens of items, not millions.
 """
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 
@@ -57,7 +58,9 @@ def get_bot_symbols(table) -> list[str]:
 def record_trade(table, symbol: str, side: str, qty: int,
                  order: dict, ts: str, price: float = 0.0) -> None:
     table.put_item(Item={
-        "pk": f"ORDER#{order['id']}", "sk": ts,
+        "pk": f"ORDER#{order['id']}", "sk": "latest",
+        "submitted_at": str(order.get("submitted_at") or ts),
+        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "symbol": symbol, "side": side, "qty": int(qty),
         "price": Decimal(str(round(price, 4))),
         "order_id": str(order.get("id", "")),
@@ -68,16 +71,39 @@ def record_trade(table, symbol: str, side: str, qty: int,
     })
 
 
+TERMINAL_ORDER_STATUSES = {"filled", "canceled", "expired", "rejected", "replaced"}
+
+
+def _trade_records(table):
+    """One observation per broker order, including older timestamp-keyed rows.
+
+    Alpaca can revise submitted_at after acceptance. The broker order ID,
+    rather than that timestamp, is the stable identity. Retain legacy rows
+    without publishing them as additional fills.
+    """
+    records = {}
+    def priority(item):
+        return (item["sk"] == "latest", float(item.get("filled_qty", 0)),
+                str(item.get("status", "")) in TERMINAL_ORDER_STATUSES,
+                str(item.get("updated_at", item["sk"])))
+    for item in _scan_all(table):
+        if not str(item.get("pk", "")).startswith(("TRADE#", "ORDER#")):
+            continue
+        identity = str(item.get("order_id") or (item["pk"] if str(item["pk"]).startswith("ORDER#") else (item["pk"], item["sk"])))
+        previous = records.get(identity)
+        if previous is None or priority(item) > priority(previous):
+            records[identity] = item
+    return [dict(i, sk=str(i.get("submitted_at", i["sk"]))) for i in records.values()]
+
+
 def get_trades(table, limit: int = 50) -> list[dict]:
-    trades = [i for i in _scan_all(table)
-              if str(i.get("pk", "")).startswith(("TRADE#", "ORDER#"))]
+    trades = _trade_records(table)
     return sorted(trades, key=lambda i: str(i["sk"]), reverse=True)[:limit]
 
 
 def pending_trades(table):
-    terminal = {"filled", "canceled", "expired", "rejected", "replaced"}
-    return [i for i in _scan_all(table) if str(i.get("pk", "")).startswith(("ORDER#", "TRADE#"))
-            and str(i.get("status", "")) not in terminal and i.get("order_id")]
+    return [i for i in _trade_records(table)
+            if str(i.get("status", "")) not in TERMINAL_ORDER_STATUSES and i.get("order_id")]
 
 
 def refresh_orders(alpaca, table):

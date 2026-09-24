@@ -336,6 +336,37 @@ class PipelineTests(unittest.TestCase):
                 self.execute()
         self.assertFalse(self.broker.orders)
 
+    def test_broker_timestamp_revision_does_not_duplicate_order(self):
+        order = dict(id="stable-id", status="pending_new", qty="10", filled_qty="0",
+                     submitted_at="2026-08-10T19:45:00.123000Z")
+        state.record_trade(self.table, "A", "buy", 10, order, order["submitted_at"])
+        order.update(status="filled", filled_qty="10", filled_avg_price="20.1",
+                     submitted_at="2026-08-10T19:45:00.124567Z")
+        state.record_trade(self.table, "A", "buy", 10, order, order["submitted_at"])
+        trades = state.get_trades(self.table)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["status"], "filled")
+        self.assertEqual(trades[0]["sk"], order["submitted_at"])
+        self.assertFalse(state.pending_trades(self.table))
+        self.assertEqual(len(self.table.items), 1)
+
+    def test_legacy_order_duplicates_are_preserved_but_counted_once(self):
+        original = dict(pk="ORDER#stable-id", sk="2026-08-10T19:45:00.123Z",
+                        order_id="stable-id", symbol="A", side="buy", qty=10,
+                        status="pending_new", filled_qty=0)
+        self.table.put_item(Item=original)
+        filled = dict(original, sk="2026-08-10T19:45:00.124Z", status="filled", filled_qty=10)
+        self.table.put_item(Item=filled)
+        self.assertEqual(len(state.get_trades(self.table)), 1)
+        self.assertEqual(state.get_trades(self.table)[0]["filled_qty"], 10)
+        self.assertFalse(state.pending_trades(self.table))
+        self.assertEqual(len(self.table.items), 2)
+        # A new observation uses a stable key and supersedes legacy copies.
+        order = dict(id="stable-id", status="filled", filled_qty=10, filled_avg_price="20.1")
+        state.record_trade(self.table, "A", "buy", 10, order, filled["sk"])
+        self.assertEqual(len(state.get_trades(self.table)), 1)
+        self.assertEqual(len(self.table.items), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
