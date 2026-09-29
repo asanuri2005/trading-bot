@@ -12,3 +12,7 @@ models/candidates/
 review-backup-*.zip
 *.log
 .DS_Store
+.aws/
+*.pem
+*.key
+.publish/

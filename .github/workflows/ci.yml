@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Check packaged strategies and frozen model
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for name in ['strategies.py', 'models/logreg.json']:
+              assert Path(name).read_bytes() == (Path('aws/src') / name).read_bytes(), name
+          PY
+      - name: Accounting, research, and broker regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Offline portfolio smoke test
+        run: python portfolio_backtest.py --csv data/orcl-1995-2014.txt data/nvda-1999-2014.txt --strategy dualmom --eval-start 2012-01-01 --outdir output/ci
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci --prefix dashboard
+      - run: node --test dashboard/src/metrics.test.js
+      - run: npm run build --prefix dashboard

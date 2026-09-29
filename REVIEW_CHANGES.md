@@ -1,3 +1,5 @@
+> **Dated design notes.** The dry-run status below describes the September 11 revision. Alpaca paper execution was subsequently enabled; see [PAPER_READINESS.md](PAPER_READINESS.md). New deployments still default to dry run.
+
 # Comparison and execution revision — September 2026
 
 The source backup before this revision is `review-backup-20260910.zip`.
