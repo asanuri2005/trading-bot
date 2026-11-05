@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 TRADING_PAPER = "https://paper-api.alpaca.markets"
 DATA_BASE = "https://data.alpaca.markets"
+
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+RETRY_DELAYS_S = (1, 3)  # waits before the second and third attempts of a read
 
 
 class AlpacaError(RuntimeError):
@@ -43,13 +47,26 @@ class Alpaca:
             },
             data=json.dumps(body).encode() if body is not None else None,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                payload = resp.read().decode()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:300]
-            raise AlpacaError(f"{method} {path} -> HTTP {exc.code}: {detail}", exc.code) from exc
-        return json.loads(payload) if payload else {}
+        # Reads are retried on throttling, server errors and network failures,
+        # so one transient blip doesn't cancel a day's batch. Order submission
+        # (POST) never is: a blind retry could place a second order, and the
+        # executor already recovers lost responses by client order ID.
+        attempts = len(RETRY_DELAYS_S) + 1 if method == "GET" else 1
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    payload = resp.read().decode()
+                return json.loads(payload) if payload else {}
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode(errors="replace")[:300]
+                if last or exc.code not in RETRY_STATUSES:
+                    raise AlpacaError(f"{method} {path} -> HTTP {exc.code}: {detail}",
+                                      exc.code) from exc
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if last:
+                    raise
+            time.sleep(RETRY_DELAYS_S[attempt])
 
     # ---------------------------------------------------------- market data
     def daily_bars(self, symbol: str, limit: int = 320,
@@ -80,7 +97,8 @@ class Alpaca:
         return self._request(self.trading_base, "GET", "/v2/calendar", {"start": start, "end": end})
 
     def open_orders(self):
-        orders = self._request(self.trading_base, "GET", "/v2/orders", {"status": "open", "limit": 500})
+        orders = self._request(self.trading_base, "GET", "/v2/orders",
+                               {"status": "open", "limit": 500})
         if len(orders) >= 500:
             raise AlpacaError("open order response at limit; refusing incomplete reconciliation")
         return orders
@@ -90,7 +108,8 @@ class Alpaca:
 
     def order_by_client_id(self, client_id):
         try:
-            return self._request(self.trading_base, "GET", "/v2/orders:by_client_order_id",
+            return self._request(self.trading_base, "GET",
+                                 "/v2/orders:by_client_order_id",
                                  {"client_order_id": client_id})
         except AlpacaError as exc:
             if exc.status == 404:

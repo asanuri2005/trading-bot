@@ -37,7 +37,8 @@ def run_portfolio(prices, strategy, budget=12000, cost_bps=5, start=None):
             weights = {s: float(sig.iloc[i-1]) / len(frames) for s, sig in signals.items()}
         previous = advance(previous, close.loc[date].to_dict(), weights, budget, cost_bps,
                            hold=getattr(strategy, "buy_and_hold", False))
-        results.append(dict(date=date, **{k: v for k, v in previous.items() if k not in ("positions", "prices")}))
+        summary = {k: v for k, v in previous.items() if k not in ("positions", "prices")}
+        results.append(dict(date=date, **summary))
     return pd.DataFrame(results).set_index("date")
 
 
@@ -66,7 +67,8 @@ def main():
         returns = result.day_ret
         sharpe = returns.mean() / returns.std() * 252**0.5 if returns.std() else float("nan")
         drawdown = (result.equity / result.equity.cummax().clip(lower=args.budget) - 1).min()
-        print(f"{strategy.name}: return={result.cum_ret.iloc[-1]:.2%}, Sharpe={sharpe:.2f}, maxDD={drawdown:.2%}; {path}")
+        print(f"{strategy.name}: return={result.cum_ret.iloc[-1]:.2%}, "
+              f"Sharpe={sharpe:.2f}, maxDD={drawdown:.2%}; {path}")
 
 
 if __name__ == "__main__":

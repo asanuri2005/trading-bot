@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { byReturn, percentagePoints } from "./metrics";
+import { byReturn, identicalBooks, leaderGap, percentagePoints } from "./metrics";
 import {
   CartesianGrid,
   Line,
@@ -103,11 +103,16 @@ function PnlDelta({ value, pctValue, label = "today" }) {
   return <div className={`delta ${cls}`}>{text}</div>;
 }
 
-function BookCard({ book, color }) {
+function BookCard({ book, color, twins = [] }) {
   const positions = Object.entries(book.positions || {});
   return (
     <section className="card book" style={{ "--book-color": color }}>
       <h2>{book.display}</h2>
+      {twins.length > 0 && (
+        <p className="twin-note">
+          Same holdings as {twins.join(" and ")} every day so far: one result, not two.
+        </p>
+      )}
       {/* Return leads, dollars follow: the dollar figure mostly tracks how
           many names a book happens to hold, not how well it picked them. */}
       <p className={`big ${(book.cum_ret || 0) >= 0 ? "pos" : "neg"}`}>
@@ -136,15 +141,22 @@ function BookCard({ book, color }) {
 // compared to one holding twelve on P&L alone, since the wider book simply has
 // more capital at work. Percentage removes the size difference.
 
-function Scoreline({ books }) {
+// Twins lead together, and their lead is measured against the best book
+// outside the pair; otherwise identical books would read as "dead even".
+function Scoreline({ books, twins }) {
   if (books.length < 2) return null;
-  const [leader, runnerUp] = byReturn(books);
-  const gap = (leader.cum_ret || 0) - (runnerUp.cum_ret || 0);
+  const { leaders, gap } = leaderGap(books, twins);
+  if (gap === null) return <div className="scoreline flat">all books identical so far</div>;
   if (Math.abs(gap) < 0.00005) return <div className="scoreline flat">dead even</div>;
   return (
     <div className="scoreline">
-      <span style={{ color: colorFor(leader.name) }}>{leader.display}</span>{" "}
-      leads by {percentagePoints(gap)}
+      {leaders.map((book, i) => (
+        <React.Fragment key={book.name}>
+          {i > 0 && " and "}
+          <span style={{ color: colorFor(book.name) }}>{book.display}</span>
+        </React.Fragment>
+      ))}{" "}
+      {leaders.length > 1 ? "lead" : "leads"} by {percentagePoints(gap)}
     </div>
   );
 }
@@ -367,6 +379,8 @@ export default function App() {
   // Leaderboard order — best return first. Colours are keyed by book name, so
   // reordering here never repaints a line.
   const books = useMemo(() => byReturn(levelled), [levelled]);
+  const twins = useMemo(() => identicalBooks(books), [books]);
+  const displayName = (name) => books.find((b) => b.name === name)?.display || name;
   return (
     <div className="wrap">
       <header className="masthead">
@@ -415,6 +429,7 @@ export default function App() {
                 key={book.name}
                 book={book}
                 color={colorFor(book.name)}
+                twins={(twins[book.name] || []).map(displayName)}
               />
             ))}
           </div>
@@ -444,7 +459,7 @@ export default function App() {
                     $
                   </button>
                 </div>
-                <Scoreline books={books} />
+                <Scoreline books={books} twins={twins} />
               </div>
             </div>
             <RaceChart books={books} metric={metric} />

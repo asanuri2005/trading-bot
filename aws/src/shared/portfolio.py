@@ -42,7 +42,8 @@ def advance(previous, prices, weights, budget=12000, cost_bps=5,
         raise ValueError("invalid budget or cost")
     if any(not positive(p) for p in prices.values()):
         raise ValueError("missing/nonpositive/nonfinite close")
-    if any(not math.isfinite(w) or w < 0 for w in weights.values()) or sum(weights.values()) > 1 + 1e-9:
+    if (any(not math.isfinite(w) or w < 0 for w in weights.values())
+            or sum(weights.values()) > 1 + 1e-9):
         raise ValueError("invalid weights")
     positions = {s: float(q) for s, q in (previous or {}).get("positions", {}).items()}
     if not set(positions).union(weights) <= set(prices):

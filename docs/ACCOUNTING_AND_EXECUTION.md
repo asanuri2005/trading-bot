@@ -1,4 +1,4 @@
-> **Dated design notes.** The dry-run status below describes the September 11 revision. Alpaca paper execution was subsequently enabled; see [PAPER_READINESS.md](PAPER_READINESS.md). New deployments still default to dry run.
+> **Dated design notes.** The dry-run status below describes the September 11 revision. Alpaca paper execution was subsequently enabled; see [PAPER_LAUNCH_2026-09.md](PAPER_LAUNCH_2026-09.md). New deployments still default to dry run.
 
 # Comparison and execution revision — September 2026
 
@@ -133,3 +133,24 @@ API references used: [Alpaca orders](https://docs.alpaca.markets/us/docs/working
   `2f3fad35a37c4035aa1dbe5fb35fe0717c997100683d1fc362a49c6d25545db3`.
 
 Dashboard: https://d3vpu1cg2par0x.cloudfront.net/
+
+## Execution revision — October 8, 2026
+
+Shadow-ledger accounting is unchanged; these affect broker execution only.
+
+- **Lots carry forward.** Each book's shares in a name keep their count while
+  the book still holds it at the same weight and the position's value stays
+  within 20% of its dollar target. On entry, or outside that band, the lot is
+  re-sized at the current price. Previously every lot was re-sized daily, so
+  whole-share rounding produced 1–4 share trades on days when no signal changed
+  (SLB and FCX, September 25 – October 5). Plans now record per-book lots; the
+  first plan after the change sizes every lot fresh.
+- **One symbol no longer blocks the day.** A symbol that is not tradable, or has
+  no trade in the last 15 minutes, waits for the next run while the others
+  trade. The run is skipped only when no symbol can trade.
+- **A late bar is tolerated once.** If a symbol's bar for the previous session
+  has not arrived, its signals use the session before, and the RUN records it
+  under `late_symbols`. Two or more missing sessions still block the batch.
+- **Reads retry.** Alpaca GET requests make up to three attempts on HTTP 429/5xx
+  and network failures. Order submission is never retried; lost responses are
+  still recovered by client order ID.

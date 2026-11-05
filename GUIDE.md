@@ -4,7 +4,7 @@
 
 The research tools replay trading rules on historical prices. The AWS functions collect daily signals, reconcile an Alpaca paper portfolio, and value seven simulated books. The React dashboard displays the published comparison and broker order records.
 
-For a quick look, follow the [account-free dashboard setup](README.md#try-it-without-accounts). For technical details, read [the accounting and execution review](REVIEW_CHANGES.md).
+For a quick look, follow the [account-free dashboard setup](README.md#try-it-without-accounts). For technical details, read [the accounting and execution review](docs/ACCOUNTING_AND_EXECUTION.md).
 
 ## Understanding the dashboard
 
@@ -47,7 +47,7 @@ This script resolves the stack outputs, builds the dashboard, uploads its assets
 
 ## Operate and change an experiment
 
-Review the Lambda logs and complete daily records before enabling paper orders. The executor requires a fresh complete signal batch, matching configuration, valid prices, an active paper account, no unresolved open orders, and available cash. See [PAPER_READINESS.md](PAPER_READINESS.md) for the dated checks used for the existing deployment; those checks do not automatically validate a new account.
+Review the Lambda logs and complete daily records before enabling paper orders. The executor requires a fresh complete signal batch, matching configuration, an active paper account, no unresolved open orders, and available cash. A ticker without a recent trade price waits for the next run while the rest trade. See [the paper-launch record](docs/PAPER_LAUNCH_2026-09.md) for the dated checks used for the existing deployment; those checks do not automatically validate a new account.
 
 When ready for paper execution, deliberately set `DryRun=false` in your deployment parameters and redeploy. Keep the account dedicated to this bot. The code rejects live-money endpoints; live trading requires a separate implementation review.
 

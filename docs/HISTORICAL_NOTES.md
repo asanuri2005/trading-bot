@@ -5,11 +5,11 @@
 **Current implementation:** seven cash-inclusive shadow books with equal
 $12,000 starting budgets, including buy-and-hold. Old percentage rankings
 excluded idle cash and should not be used to compare whole portfolios.
-See [REVIEW_CHANGES.md](../REVIEW_CHANGES.md) for current accounting, commands,
+See [ACCOUNTING_AND_EXECUTION.md](ACCOUNTING_AND_EXECUTION.md) for current accounting, commands,
 deployment settings and limitations. Research tables below predate the
 evaluation fixes and are retained as historical notes, not fresh validation.
 
-See [PAPER_READINESS.md](../PAPER_READINESS.md) for the September 24 operational
+See [PAPER_LAUNCH_2026-09.md](PAPER_LAUNCH_2026-09.md) for the September 24 operational
 audit, paper-account launch settings, and activation/pause procedure.
 
 Vectorized daily backtester with pluggable strategies. This is the local

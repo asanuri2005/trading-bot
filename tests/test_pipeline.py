@@ -367,6 +367,113 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(state.get_trades(self.table)), 1)
         self.assertEqual(len(self.table.items), 3)
 
+    # ---- a ticker whose data or price is late must not cancel the whole day
+
+    def test_symbol_one_session_late_is_used_and_recorded(self):
+        # The previous session for 2026-08-10 is 2026-08-07; B's bar for it is missing.
+        self.broker.bars["B"] = [b for b in self.broker.bars["B"] if b["t"][:10] != "2026-08-07"]
+        self.signal()
+        run = exp.get(self.table, "RUN", exp.today())
+        self.assertEqual(run["late_symbols"], ["B"])
+        self.assertEqual(len(run["targets"]), 28)
+
+    def test_symbol_two_sessions_late_still_blocks_the_batch(self):
+        self.broker.bars["B"] = [b for b in self.broker.bars["B"]
+                                 if b["t"][:10] not in ("2026-08-06", "2026-08-07")]
+        with self.assertRaisesRegex(ValueError, "incomplete history"):
+            self.signal()
+        self.assertIsNone(exp.get(self.table, "RUN", exp.today()))
+
+    def test_one_unpriced_symbol_waits_while_others_trade(self):
+        self.signal()
+        priced = self.broker.latest_trade
+
+        def latest_trade(symbol):
+            return {"p": 20, "t": "2020-01-01T00:00:00Z"} if symbol == "B" else priced(symbol)
+
+        with patch.dict(os.environ, {"DRY_RUN": "false"}), \
+                patch.object(self.broker, "latest_trade", side_effect=latest_trade):
+            result = self.execute()
+        self.assertIn({"symbol": "B", "waiting": "missing/stale execution price"},
+                      result["actions"])
+        traded = {o["symbol"] for o in self.broker.orders}
+        self.assertTrue(traded)
+        self.assertNotIn("B", traded)
+
+    # ---- broker lots are carried forward instead of re-rounded every day
+
+    def _trade_two_days(self, day_two_price):
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            self.signal()
+            self.execute()
+            day_one_orders = len(self.broker.orders)
+            with patch.object(exp, "today", return_value="2026-08-11"):
+                self.signal()
+                runs = [exp.get(self.table, "RUN", d)["books"] for d in ("2026-08-10", "2026-08-11")]
+                self.assertEqual(*[{name: book["weights"] for name, book in b.items()}
+                                   for b in runs], "precondition: same signals both days")
+                with patch.object(self.broker, "latest_trade",
+                                  return_value={"p": day_two_price,
+                                                "t": dt.datetime.now(dt.timezone.utc).isoformat()}):
+                    self.execute()
+        return self.broker.orders[day_one_orders:]
+
+    def test_price_move_inside_band_places_no_orders(self):
+        self.assertEqual(self._trade_two_days(20.6), [])  # +3%: rounding alone would trade
+
+    def test_price_move_outside_band_rebalances(self):
+        orders = self._trade_two_days(26.0)  # +30%: positions now well above target
+        self.assertTrue(orders)
+        self.assertTrue(all(o["side"] == "sell" for o in orders))
+
+
+class SizeLotsTests(unittest.TestCase):
+    """executor_handler.size_lots: 12,000 budget, so a 1/12 weight targets $1,000."""
+
+    W = 1 / 12
+
+    def run_with(self, weights, buy_and_hold=None):
+        books = {"tsmom": dict(weights=weights, buy_and_hold=False)}
+        if buy_and_hold:
+            books["buy_and_hold"] = dict(weights=buy_and_hold, buy_and_hold=True)
+        return dict(config=dict(budget=12000), books=books)
+
+    def lots(self, weights, prices, previous=None, **kw):
+        result = executor_handler.size_lots(self.run_with(weights, **kw), prices, previous or {})
+        return {s: lot["shares"] for s, lot in result.get("tsmom", {}).items()}
+
+    def carried(self, shares, weight=W):
+        return {"tsmom": {"X": {"weight": weight, "shares": shares}}}
+
+    def test_new_lot_is_sized_with_the_price_buffer(self):
+        self.assertEqual(self.lots({"X": self.W}, {"X": 20}), {"X": 49})  # 1000 / 20.40
+
+    def test_carried_lot_kept_while_value_stays_in_band(self):
+        # Fresh sizing at 20.6 would give 47 shares; the carried 49 are within 20%.
+        self.assertEqual(self.lots({"X": self.W}, {"X": 20.6}, self.carried(49)), {"X": 49})
+
+    def test_carried_lot_resized_once_value_leaves_band(self):
+        self.assertEqual(self.lots({"X": self.W}, {"X": 26}, self.carried(49)), {"X": 37})
+
+    def test_exits_entries_and_weight_changes(self):
+        self.assertEqual(self.lots({"X": 0}, {"X": 20}, self.carried(49)), {})
+        self.assertEqual(self.lots({"X": self.W, "Y": self.W}, {"X": 20, "Y": 50},
+                                   self.carried(49)), {"X": 49, "Y": 19})
+        self.assertEqual(self.lots({"X": self.W}, {"X": 20}, self.carried(150, weight=1 / 3)),
+                         {"X": 49})
+
+    def test_unaffordable_zero_share_lot_is_retried(self):
+        self.assertEqual(self.lots({"X": self.W}, {"X": 990}), {"X": 0})
+        self.assertEqual(self.lots({"X": self.W}, {"X": 950}, self.carried(0)), {"X": 1})
+
+    def test_unpriced_symbol_keeps_existing_lot_only(self):
+        self.assertEqual(self.lots({"X": self.W}, {}, self.carried(49)), {"X": 49})
+        self.assertEqual(self.lots({"X": self.W}, {}), {})
+
+    def test_buy_and_hold_benchmark_gets_no_broker_lots(self):
+        run = self.run_with({"X": self.W}, buy_and_hold={"X": 1.0})
+        self.assertNotIn("buy_and_hold", executor_handler.size_lots(run, {"X": 20}, {}))
+
 
 if __name__ == "__main__":
     unittest.main()

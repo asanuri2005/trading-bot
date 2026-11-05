@@ -4,7 +4,7 @@
 
 A Python research and paper-trading system with a React dashboard. It compares seven strategy books, runs scheduled workloads on AWS, and reconciles a combined portfolio with Alpaca's paper brokerage.
 
-**[View the deployed dashboard](https://d3vpu1cg2par0x.cloudfront.net/)** · [How it works](GUIDE.md) · [Accounting and execution design](REVIEW_CHANGES.md)
+**[View the deployed dashboard](https://d3vpu1cg2par0x.cloudfront.net/)** · [How it works](GUIDE.md) · [Accounting and execution design](docs/ACCOUNTING_AND_EXECUTION.md)
 
 The engineering focus is reproducible comparisons and reliable execution: cash-inclusive returns, immutable daily records, retry-safe order submission, and a clear separation between simulated performance and broker fills. This is a personal research project; the results do not establish an advantage over buy-and-hold.
 
@@ -74,7 +74,7 @@ The six active strategies also contribute targets to **one combined Alpaca paper
 - **Experiments are explicit.** The universe, budget, costs, lineup, and model hash are frozen per experiment. A changed configuration needs a new experiment ID; old records remain available.
 - **Paper execution only.** New deployments default to `DryRun=true`, and the executor rejects the live-money endpoint. The existing demonstration deployment has paper execution enabled.
 
-See [the implementation review](REVIEW_CHANGES.md) and [dated paper-launch checks](PAPER_READINESS.md) for details and limitations.
+See [the implementation review](docs/ACCOUNTING_AND_EXECUTION.md) and [dated paper-launch checks](docs/PAPER_LAUNCH_2026-09.md) for details and limitations.
 
 ## Run the research and checks
 

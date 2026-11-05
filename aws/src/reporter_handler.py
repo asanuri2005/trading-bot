@@ -18,11 +18,13 @@ DISPLAY = {"tsmom_126": "TSMOM 6mo", "rsi2_lt10_r200": "RSI-2 + 200d",
 def lambda_handler(event, context):
     date = (event or {}).get("as_of_date", exp.today())
     alpaca, table = runtime.get_alpaca(), runtime.get_table()
-    sessions = alpaca.calendar((dt.date.fromisoformat(date)-dt.timedelta(days=15)).isoformat(), date)
+    window_start = (dt.date.fromisoformat(date) - dt.timedelta(days=15)).isoformat()
+    sessions = alpaca.calendar(window_start, date)
     session = next((s for s in sessions if s["date"] == date), None)
     if session is None:
         return {"skipped": "not a trading session"}
-    closes_at = dt.datetime.fromisoformat(date + "T" + session["close"]).replace(tzinfo=ZoneInfo("America/New_York"))
+    closes_at = dt.datetime.fromisoformat(f"{date}T{session['close']}").replace(
+        tzinfo=ZoneInfo("America/New_York"))
     if dt.datetime.now(dt.timezone.utc) < closes_at:
         return {"skipped": "session has not closed"}
     run = exp.get(table, "RUN", date)
@@ -83,19 +85,20 @@ def lambda_handler(event, context):
             print(json.dumps({"event": "order_refresh_failed", "error_type": type(exc).__name__}))
         finally:
             exp.release_executor(table, owner)
-    trades = state.get_trades(table)
+    trades = [dict(ts=str(t["sk"]), symbol=str(t["symbol"]), side=str(t["side"]),
+                   qty=float(t["qty"]), price=float(t.get("filled_avg_price", 0)),
+                   filled_qty=float(t.get("filled_qty", 0)), status=str(t.get("status", "")))
+              for t in state.get_trades(table)]
     data = dict(schema_version=2, experiment_id=exp.experiment_id(),
                 start_date=records[0]["date"], as_of=latest["date"],
                 generated_at=dt.datetime.now(dt.timezone.utc).isoformat(),
                 accounting="shadow_cash_inclusive", cost_bps=latest["config"]["cost_bps"],
                 book_budget=latest["config"]["budget"], model_hash=latest["config"]["model_hash"],
                 account=account, orders_refreshed=orders_refreshed,
-                strategies=reports, targets=latest_run["targets"],
-                trades=[dict(ts=str(t["sk"]), symbol=str(t["symbol"]), side=str(t["side"]),
-                             qty=float(t["qty"]), price=float(t.get("filled_avg_price", 0)),
-                             filled_qty=float(t.get("filled_qty", 0)), status=str(t.get("status", ""))) for t in trades])
+                strategies=reports, targets=latest_run["targets"], trades=trades)
     bucket = runtime.env("DASHBOARD_BUCKET", "")
     if bucket:
-        runtime.get_s3().put_object(Bucket=bucket, Key="data.json", Body=json.dumps(data, allow_nan=False),
+        runtime.get_s3().put_object(Bucket=bucket, Key="data.json",
+                                    Body=json.dumps(data, allow_nan=False),
                                     ContentType="application/json", CacheControl="no-store")
     return {"as_of": latest["date"], "strategies": len(reports), "published": bool(bucket)}
