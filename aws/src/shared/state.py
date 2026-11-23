@@ -33,7 +33,7 @@ def _scan_all(table) -> list[dict]:
 def put_bot_position(table, symbol: str, shares: int, ts: str) -> None:
     table.put_item(Item={
         "pk": f"BOTPOS#{symbol}", "sk": "latest",
-        "symbol": symbol, "shares": int(shares), "ts": ts,
+        "symbol": symbol, "shares": Decimal(str(shares)), "ts": ts,
     })
 
 

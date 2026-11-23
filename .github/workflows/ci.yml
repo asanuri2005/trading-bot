@@ -31,7 +31,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          for name in ['strategies.py', 'models/logreg.json']:
+          for name in ['strategies.py', 'models/ml_logreg_v2.json', 'models/ml_gbt.json']:
               assert Path(name).read_bytes() == (Path('aws/src') / name).read_bytes(), name
           PY
       - name: Accounting, research, and broker regression tests

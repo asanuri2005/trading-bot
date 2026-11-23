@@ -10,10 +10,11 @@ import {
   YAxis,
 } from "recharts";
 
-// Six categorical hues stepped for this dark surface (#161f2b) and validated
+// Seven categorical hues stepped for this dark surface (#161f2b) and validated
 // as a set: lightness band, chroma floor, colourblind separation, normal-vision
 // separation, and >=3:1 contrast all pass. Order is fixed — never cycle or
-// regenerate a hue for a seventh book; give it a slot here instead.
+// regenerate a hue for another book; give it a slot here instead. The next
+// validated hue, if one is ever needed, is #e66767.
 const SERIES_COLORS = [
   "#3987e5", // blue
   "#d95926", // orange
@@ -21,7 +22,8 @@ const SERIES_COLORS = [
   "#c98500", // yellow
   "#d55181", // magenta
   "#008300", // green
-  "#d9e0ea", // dashed buy-and-hold reference
+  "#9085e9", // violet
+  "#d9e0ea", // dashed buy-and-hold reference (neutral, not a series hue)
 ];
 
 // Colour follows the book, never its position in the list: the reporter sorts
@@ -31,10 +33,11 @@ const BOOK_SLOT = {
   tsmom_126: 0,
   rsi2_lt10_r200: 1,
   ml_logreg: 2,
-  xsmom_126_top3: 3,
-  dualmom_126_top3: 4,
+  xsmom_126_top5_keep10: 3,
+  breadth_all_sma200_gt50: 4,
   ens_2of3: 5,
-  buy_and_hold: 6,
+  ml_gbt: 6,
+  buy_and_hold: 7,
 };
 
 // An unregistered book still gets a stable colour rather than a shifting one.

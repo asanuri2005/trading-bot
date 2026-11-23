@@ -2,3 +2,4 @@ pandas>=2.0
 numpy
 matplotlib
 yfinance
+lightgbm==4.6.0

@@ -4,7 +4,7 @@ PYTHON ?= python
 sync:
 	cp strategies.py aws/src/strategies.py
 	mkdir -p aws/src/models
-	cp models/logreg.json aws/src/models/logreg.json
+	cp models/ml_logreg_v2.json models/ml_gbt.json aws/src/models/
 
 test: sync
 	$(PYTHON) -m unittest discover -s tests -v

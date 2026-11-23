@@ -78,6 +78,10 @@ class Broker:
     def latest_trade(self, symbol):
         return dict(p=20, t=dt.datetime.now(dt.timezone.utc).isoformat())
 
+    def latest_trades(self, symbols):
+        # Built on latest_trade, so tests that patch it still shape every price.
+        return {s: self.latest_trade(s) for s in symbols}
+
     def asset(self, symbol):
         return dict(symbol=symbol, status="active", tradable=True)
 
@@ -123,15 +127,19 @@ class PipelineTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    @property
+    def books(self):
+        return len(runtime.get_lineup())  # every strategy book, buy-and-hold included
+
     def signal(self):
         return signal_handler.lambda_handler({}, None)
 
     def execute(self):
         return executor_handler.lambda_handler({}, None)
 
-    def test_seven_books_atomic_publish_and_no_rewrite(self):
+    def test_all_books_atomic_publish_and_no_rewrite(self):
         first = self.signal()
-        self.assertEqual(len(first["targets"]), 28)
+        self.assertEqual(len(first["targets"]), 4 * self.books)
         self.broker.bars["A"][-2]["c"] *= 3
         self.assertEqual(self.signal()["run_id"], first["run_id"])
 
@@ -147,7 +155,7 @@ class PipelineTests(unittest.TestCase):
         self.signal()
         reporter_handler.lambda_handler({}, None)
         original = exp.get(self.table, "LEDGER", exp.today())
-        self.assertEqual(len(original["books"]), 7)
+        self.assertEqual(len(original["books"]), self.books)
         for b in original["books"].values():
             self.assertAlmostEqual(b["equity"], b["cash"]+b["capital"])
             self.assertAlmostEqual(b["cum_ret"], b["equity"]/12000-1)
@@ -283,7 +291,7 @@ class PipelineTests(unittest.TestCase):
             reporter_handler.lambda_handler({}, None)
         data = json.loads(self.objects["data.json"])
         self.assertFalse(data["orders_refreshed"])
-        self.assertEqual(len(data["strategies"]), 7)
+        self.assertEqual(len(data["strategies"]), self.books)
         owner = exp.acquire_executor(self.table)
         self.assertIsNotNone(owner)
         exp.release_executor(self.table, owner)
@@ -376,7 +384,7 @@ class PipelineTests(unittest.TestCase):
         self.signal()
         run = exp.get(self.table, "RUN", exp.today())
         self.assertEqual(run["late_symbols"], ["B"])
-        self.assertEqual(len(run["targets"]), 28)
+        self.assertEqual(len(run["targets"]), 4 * self.books)
 
     def test_symbol_two_sessions_late_still_blocks_the_batch(self):
         self.broker.bars["B"] = [b for b in self.broker.bars["B"]
@@ -439,18 +447,42 @@ class PipelineTests(unittest.TestCase):
         self.broker.pos = {"A": Decimal("10.106")}
         state.put_bot_position(self.table, "A", 10, "2026-08-07")
 
-    def test_stock_dividend_remainder_is_sold_and_trading_continues(self):
+    def test_stock_dividend_fraction_trades_to_its_fractional_target(self):
         self.signal()
         self._hold_with_stock_dividend()
         with patch.dict(os.environ, {"DRY_RUN": "false"}), self._fractionable(True):
-            result = self.execute()  # previously raised "unsupported fractional holding"
+            result = self.execute()  # before November 23 this raised on the fraction
         self.assertNotIn("skipped", result)
-        remainder = [o for o in self.broker.orders if o["qty"] == Decimal("0.106")]
-        self.assertEqual(len(remainder), 1)
-        self.assertEqual(remainder[0]["side"], "sell")
-        self.assertTrue(any(o["qty"] >= 1 for o in self.broker.orders))
-        self.assertEqual(self.broker.pos["A"], int(self.broker.pos["A"]))
+        plan = exp.get(self.table, "PLAN", exp.today())
+        self.assertAlmostEqual(float(self.broker.pos["A"]), plan["desired"]["A"], places=4)
         json.dumps(result)  # fractional quantities must still serialise for the log
+
+    def test_fractional_lots_buy_a_slice_of_an_expensive_stock(self):
+        self.signal()
+        priced = self.broker.latest_trade
+        with patch.dict(os.environ, {"DRY_RUN": "false"}), self._fractionable(True),                 patch.object(self.broker, "latest_trade", side_effect=lambda s: dict(priced(s), p=900)):
+            self.execute()
+        plan = exp.get(self.table, "PLAN", exp.today())
+        lot = plan["lots"]["tsmom_126"]["A"]
+        self.assertAlmostEqual(lot["shares"], 12000 * lot["weight"] / 900, places=3)
+        self.assertNotEqual(lot["shares"], int(lot["shares"]))  # a whole-share plan would round it
+        self.assertTrue(any(o["qty"] != int(o["qty"]) for o in self.broker.orders))
+
+    def test_small_drift_is_skipped_but_a_full_exit_is_sent(self):
+        self.signal()
+        plan = executor_handler.size_lots(exp.get(self.table, "RUN", exp.today()),
+                                          {s: 20.0 for s in "ABCD"}, {}, frozenset("ABCD"))
+        desired = {s: sum(b.get(s, {}).get("shares", 0) for b in plan.values()) for s in "ABCD"}
+        # A held $2 above target (skipped); B held but no longer wanted (must close).
+        self.broker.pos = {"A": Decimal(str(desired["A"] + 0.1)), "B": Decimal("0.0004")}
+        for s in ("A", "B"):
+            state.put_bot_position(self.table, s, self.broker.pos[s], "2026-08-07")
+        with patch.object(executor_handler, "size_lots", return_value={
+                "tsmom_126": {"A": {"weight": 0.25, "shares": desired["A"]}}}),                 patch.dict(os.environ, {"DRY_RUN": "false"}), self._fractionable(True):
+            self.execute()
+        by_symbol = {o["symbol"]: o for o in self.broker.orders}
+        self.assertNotIn("A", by_symbol)
+        self.assertEqual((by_symbol["B"]["side"], by_symbol["B"]["qty"]), ("sell", Decimal("0.0004")))
 
     def test_remainder_of_non_fractionable_asset_is_kept_and_reported(self):
         self.signal()
@@ -495,8 +527,35 @@ class PipelineTests(unittest.TestCase):
         with patch.object(self.broker, "latest_trade", side_effect=TimeoutError("data API down")):
             self.signal()
         run = exp.get(self.table, "RUN", exp.today())
-        self.assertEqual(len(run["targets"]), 28)
+        self.assertEqual(len(run["targets"]), 4 * self.books)
         self.assertEqual(run["prior_close_symbols"], ["A", "B", "C", "D"])
+
+
+    # ---- the buffered rotation remembers yesterday's holdings
+
+    def test_stateful_book_receives_the_previous_sessions_holdings(self):
+        from strategies import BufferedRotation
+        self.signal()
+        day_one = exp.get(self.table, "RUN", exp.today())["books"]["xsmom_126_top5_keep10"]["weights"]
+        seen = []
+        original = BufferedRotation.universe_signals
+
+        def spy(strategy, prices, previous=None):
+            seen.append(previous)
+            return original(strategy, prices, previous=previous)
+
+        with patch.object(exp, "today", return_value="2026-08-11"),                 patch.object(BufferedRotation, "universe_signals", spy):
+            self.signal()
+        self.assertEqual(seen, [{s for s, w in day_one.items() if w > 0}])
+
+    def test_dashboard_lists_only_this_experiments_orders(self):
+        self.signal()
+        old = dict(id="old-account", status="filled", qty="5", filled_qty="5", filled_avg_price="10",
+                   submitted_at="2026-07-01T19:45:00Z")
+        state.record_trade(self.table, "A", "buy", 5, old, old["submitted_at"])
+        reporter_handler.lambda_handler({}, None)
+        trades = json.loads(self.objects["data.json"])["trades"]
+        self.assertFalse(any(t["ts"].startswith("2026-07-01") for t in trades))
 
 
 class SizeLotsTests(unittest.TestCase):
@@ -533,6 +592,11 @@ class SizeLotsTests(unittest.TestCase):
                                    self.carried(49)), {"X": 49, "Y": 19})
         self.assertEqual(self.lots({"X": self.W}, {"X": 20}, self.carried(150, weight=1 / 3)),
                          {"X": 49})
+
+    def test_fractional_symbols_are_sized_exactly(self):
+        run = self.run_with({"X": self.W})
+        lots = executor_handler.size_lots(run, {"X": 990}, {}, frozenset({"X"}))
+        self.assertEqual(lots["tsmom"]["X"]["shares"], 1.0101)  # $1,000 / $990, rounded down
 
     def test_unaffordable_zero_share_lot_is_retried(self):
         self.assertEqual(self.lots({"X": self.W}, {"X": 990}), {"X": 0})

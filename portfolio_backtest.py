@@ -28,11 +28,13 @@ def run_portfolio(prices, strategy, budget=12000, cost_bps=5, start=None):
     # Independent strategies can compute their backward-looking signals once.
     signals = None if getattr(strategy, "cross_sectional", False) else {
         s: strategy.signals(px) for s, px in frames.items()}
-    previous, results = None, []
+    previous, results, held = None, [], None
     for date in dates:
         i = close.index.get_loc(date)
         if signals is None:
-            weights = weights_for(strategy, {s: px.iloc[:i] for s, px in frames.items()})
+            weights = weights_for(strategy, {s: px.iloc[:i] for s, px in frames.items()},
+                                  previous=held)
+            held = {s for s, w in weights.items() if w > 0}
         else:
             weights = {s: float(sig.iloc[i-1]) / len(frames) for s, sig in signals.items()}
         previous = advance(previous, close.loc[date].to_dict(), weights, budget, cost_bps,
