@@ -10,8 +10,11 @@ from zoneinfo import ZoneInfo
 from shared import experiment as exp, portfolio, runtime, state
 
 DISPLAY = {"tsmom_126": "TSMOM 6mo", "rsi2_lt10_r200": "RSI-2 + 200d",
-           "ml_logreg": "ML LogReg", "xsmom_126_top3": "Rotation top-3",
-           "dualmom_126_top3": "Dual momentum", "ens_2of3": "Ensemble 2-of-3",
+           "ml_logreg": "ML LogReg", "ml_gbt": "ML Trees (GBT)",
+           "xsmom_126_top5_keep10": "Rotation top-5 (buffered)",
+           "breadth_all_sma200_gt50": "Hold all, breadth filter",
+           "xsmom_126_top3": "Rotation top-3", "dualmom_126_top3": "Dual momentum",
+           "ens_2of3": "Ensemble 2-of-3",
            "buy_and_hold": "Buy & hold"}
 
 
@@ -88,7 +91,10 @@ def lambda_handler(event, context):
     trades = [dict(ts=str(t["sk"]), symbol=str(t["symbol"]), side=str(t["side"]),
                    qty=float(t["qty"]), price=float(t.get("filled_avg_price", 0)),
                    filled_qty=float(t.get("filled_qty", 0)), status=str(t.get("status", "")))
-              for t in state.get_trades(table)]
+              for t in state.get_trades(table, limit=500)
+              # Orders from before this experiment belong to an earlier bot,
+              # possibly in a different paper account.
+              if str(t["sk"])[:10] >= records[0]["date"]][:50]
     data = dict(schema_version=2, experiment_id=exp.experiment_id(),
                 start_date=records[0]["date"], as_of=latest["date"],
                 generated_at=dt.datetime.now(dt.timezone.utc).isoformat(),

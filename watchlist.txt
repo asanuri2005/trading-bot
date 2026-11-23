@@ -1,15 +1,78 @@
 # Trading universe — the bot may ONLY trade tickers listed here.
-# Source: halal.sh triple-screened US list (your filters).
+# Source: halal.sh triple-screened US list (compliant, financial health robust or
+# antifragile, ethical screen cleared), November 23, 2026.
+# Selection rules: only stocks marked plainly "Compliant" (none flagged Near Limit
+# or Borderline, which are the likeliest to drop out); spread across sectors;
+# large and established; tradable and fractionable on Alpaca with 210+ sessions.
+# MU and WELL were removed: they no longer appear in the triple-screened list.
 # Refresh periodically: compliance status changes as company financials change.
-MU
+# Publish changes with `make watchlist` (and a new ExperimentId, since the
+# universe is frozen per experiment).
+
+# Technology (9)
 TSM
-WELL
-COP
-NEM
+ARM
+MPWR
+WDC
+TEL
+LITE
+TEAM
+TYL
+GIB
+
+# Healthcare (9)
+NVO
+SNY
+COR
+EW
+IDXX
+BIIB
+DXCM
+WST
+LH
+
+# Industrials (10)
+UNP
+CSX
+ITW
+CMI
+GWW
+FAST
+WCN
+URI
+TRI
+ODFL
+
+# Basic materials (7)
+LIN
+BHP
 SCCO
-FCX
+NEM
 AEM
+SHW
+NUE
+
+# Energy (6)
+COP
+EOG
 CNQ
-CEG
 PSX
 SLB
+SU
+
+# Consumer cyclical (5)
+ORLY
+ROST
+RACE
+WSM
+TSCO
+
+# Consumer defensive (2)
+COKE
+ELF
+
+# Communication services (1)
+TWLO
+
+# Financial services (1)
+MSCI

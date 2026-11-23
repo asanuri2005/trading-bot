@@ -16,17 +16,17 @@ A saved plan and deterministic client order IDs make a retry reuse earlier
 orders instead of duplicating them, including after an HTTP response is lost.
 Only confirmed broker positions update BOTPOS.
 
-The plan works in whole shares, but corporate actions can leave fractions:
-a stock dividend paid in shares (SCCO, November 2026: 0.106 extra shares on
-10) or a split with an uneven ratio. The bot manages the whole-share part and
-sells any fractional remainder of a name it holds, when the asset supports
-fractional orders; otherwise the remainder is left in place and reported.
+Lots are fractional for every asset that allows fractional orders, so a
+$12,000 book can hold a few hundred dollars of a $900 stock. An asset that
+does not allow them is held in whole shares, and any fraction left there by
+a corporate action (a stock dividend paid in shares, as SCCO did in November
+2026) is kept and reported. Adjustments under MIN_ORDER_USD are skipped.
 Remainders under one share never count as unmanaged holdings.
 """
 import datetime as dt
 import json
 import math
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from shared import experiment as exp, portfolio, runtime, state
 
@@ -44,6 +44,13 @@ REBALANCE_BAND = 0.20
 
 # A last trade older than this is not a usable execution price.
 MAX_PRICE_AGE_S = 900
+
+# Fractional lots are sized to this many decimal places (Alpaca accepts up to 9).
+QTY_STEP = Decimal("0.0001")
+
+# Adjustments worth less than this are skipped as noise; closing a whole
+# position is always sent, whatever its size.
+MIN_ORDER_USD = 5.0
 
 
 def lambda_handler(event, context):
@@ -86,7 +93,7 @@ def reconcile(alpaca, table):
         if qty < 0:
             raise ValueError(f"{symbol}: unsupported short broker holding")
         if qty > 0:
-            state.put_bot_position(table, symbol, int(qty), now)
+            state.put_bot_position(table, symbol, qty, now)
         else:
             state.delete_bot_position(table, symbol)
     return positions
@@ -138,13 +145,14 @@ def _execute():
         raise ValueError("invalid order cap")
 
     symbols = sorted(set(run["config"]["universe"]) | managed)
+    trades = alpaca.latest_trades(symbols)  # one request for every symbol
     prices, waiting, fractionable = {}, {}, {}
     for symbol in symbols:
         if held.get(symbol, 0) < 0:
             raise ValueError(f"{symbol}: unsupported short broker holding")
         asset = alpaca.asset(symbol)
         fractionable[symbol] = bool(asset.get("fractionable"))
-        price, problem = _execution_price(alpaca, symbol, asset)
+        price, problem = _execution_price(asset, trades.get(symbol))
         if problem:
             waiting[symbol] = problem
         else:
@@ -159,8 +167,9 @@ def _execute():
         raise ValueError("saved plan does not match today's signal batch")
     if not plan:
         previous = _previous_plan(table, kind, date)
-        lots = size_lots(run, prices, previous["lots"] if previous else {})
-        desired = {symbol: 0 for symbol in symbols}
+        fractional = {symbol for symbol, ok in fractionable.items() if ok}
+        lots = size_lots(run, prices, previous["lots"] if previous else {}, fractional)
+        desired = {symbol: 0.0 for symbol in symbols}
         for book_lots in lots.values():
             for symbol, lot in book_lots.items():
                 desired[symbol] += lot["shares"]
@@ -168,33 +177,33 @@ def _execute():
             date=date, run_id=run["run_id"], desired=desired, lots=lots))
 
     actions = [{"symbol": s, "waiting": why} for s, why in waiting.items()]
-    orders = []  # (symbol, side, qty, is_remainder)
+    orders = []  # (symbol, side, qty)
     for symbol, qty in plan["desired"].items():
         if symbol not in prices:
             continue
-        delta = int(qty) - int(held.get(symbol, 0))  # whole shares only
-        if delta:
-            orders.append((symbol, "buy" if delta > 0 else "sell", Decimal(abs(delta)), False))
-    for symbol in sorted(set(held) & managed & set(prices)):
-        remainder = held[symbol] - int(held[symbol])
-        if not remainder:
-            continue
+        current = held.get(symbol, Decimal(0))
+        target = Decimal(str(qty))
         if fractionable[symbol]:
-            orders.append((symbol, "sell", remainder, True))
+            # Closing a position sells exactly what is held, fraction included.
+            delta = -current if target == 0 else (target - current).quantize(QTY_STEP)
         else:
-            actions.append({"symbol": symbol, "waiting": f"fractional remainder "
-                            f"{_qty(remainder)} kept: asset does not allow fractional orders"})
+            delta = Decimal(int(target) - int(current))
+            remainder = current - int(current)
+            if remainder:
+                actions.append({"symbol": symbol, "waiting": f"fractional remainder "
+                                f"{_qty(remainder)} kept: asset does not allow fractional orders"})
+        if not delta:
+            continue
+        if target != 0 and float(abs(delta)) * prices[symbol] < MIN_ORDER_USD:
+            continue  # a few dollars of drift is not worth an order
+        orders.append((symbol, "buy" if delta > 0 else "sell", abs(delta)))
 
     # Sells go first. Their proceeds are not spent in this invocation: the
     # broker reports that cash on a later run, so buys draw only on `cash`.
-    for symbol, side, qty, is_remainder in sorted(
-            orders, key=lambda order: (order[1] == "buy", order[0], order[3])):
+    for symbol, side, qty in sorted(orders, key=lambda order: (order[1] == "buy", order[0])):
         notional = float(qty) * prices[symbol] * PRICE_BUFFER
-        # A remainder sale gets its own ID; whole-share IDs are unchanged.
-        identity = [exp.experiment_id(), plan["run_id"], symbol, side]
-        if is_remainder:
-            identity.append("remainder")
-        client_id = "bot-" + exp.digest(identity)[:36]
+        client_id = "bot-" + exp.digest(
+            [exp.experiment_id(), plan["run_id"], symbol, side])[:36]
         order = None if dry_run else alpaca.order_by_client_id(client_id)
         if order:  # placed by an earlier invocation today: record it, never resubmit
             state.record_trade(table, symbol, side, Decimal(str(order["qty"])), order,
@@ -225,11 +234,12 @@ def _execute():
     return {"dry_run": dry_run, "run_id": run["run_id"], "actions": actions}
 
 
-def _execution_price(alpaca, symbol, asset):
+def _execution_price(asset, trade):
     """(price, None) for a tradable symbol, or (None, reason) if it must wait."""
     if asset.get("status") != "active" or not asset.get("tradable"):
         return None, "asset unavailable for trading"
-    trade = alpaca.latest_trade(symbol)
+    if not trade:
+        return None, "missing/stale execution price"
     traded_at = dt.datetime.fromisoformat(str(trade["t"]).replace("Z", "+00:00"))
     age_s = (dt.datetime.now(dt.timezone.utc) - traded_at).total_seconds()
     if not portfolio.positive(trade["p"]) or not -5 <= age_s <= MAX_PRICE_AGE_S:
@@ -248,15 +258,17 @@ def _previous_plan(table, kind, date):
     return max(earlier, key=lambda plan: plan["date"]) if earlier else None
 
 
-def size_lots(run, prices, previous_lots):
-    """Whole shares per (book, symbol) for the broker plan.
+def size_lots(run, prices, previous_lots, fractional=frozenset()):
+    """Shares per (book, symbol) for the broker plan.
 
     Each active book targets budget x weight dollars in every name it holds.
-    A lot carried over from the previous plan keeps its share count while the
-    book still holds the name at the same weight and the lot's value stays
-    within REBALANCE_BAND of that target; otherwise it is re-sized at today's
-    price. A symbol with no usable price keeps any lot it already had and is
-    sized once it trades. Buy & hold is a shadow benchmark and has no lots.
+    Symbols in `fractional` are sized exactly, to QTY_STEP; the rest in whole
+    shares, with the price buffer so a buy still fits in cash. A lot carried
+    over from the previous plan keeps its share count while the book still
+    holds the name at the same weight and the lot's value stays within
+    REBALANCE_BAND of that target; otherwise it is re-sized at today's price.
+    A symbol with no usable price keeps any lot it already had and is sized
+    once it trades. Buy & hold is a shadow benchmark and has no lots.
     """
     budget = float(run["config"]["budget"])
     lots = {}
@@ -280,6 +292,9 @@ def size_lots(run, prices, previous_lots):
                            and abs(carried["shares"] * price - target) <= REBALANCE_BAND * target)
             if within_band:
                 book_lots[symbol] = carried
+            elif symbol in fractional:
+                shares = Decimal(str(target / price)).quantize(QTY_STEP, rounding=ROUND_DOWN)
+                book_lots[symbol] = {"weight": weight, "shares": float(shares)}
             else:
                 book_lots[symbol] = {"weight": weight,
                                      "shares": int(target / (price * PRICE_BUFFER))}

@@ -395,6 +395,210 @@ class Ensemble:
         return (votes >= self.min_votes).astype(int)
 
 
+# ------------------------------------------------- cross-sectional ML ranker
+# Version 2 of the ML books. The first model asked "will this stock rise over
+# the next 5 days?". Stocks rise slightly more often than they fall, so it
+# learned to say yes to almost everything and behaved like buy-and-hold.
+# These ask "will this stock beat the other watchlist stocks over the next
+# 5 days?" and hold the few ranked highest. The features add each stock's
+# standing against its peers and the state of the whole watchlist.
+# Shared by ml_rank.py (training) and MLRanker (inference); order matters,
+# because exported models index their inputs by position.
+PANEL_FEATURES = FEATURES + [
+    "xs_r21", "xs_r126", "xs_vol21",        # percentile rank among peers that day
+    "rel_r5",                               # 5-day return minus the peer median
+    "mkt_r21", "mkt_vol21", "mkt_breadth",  # the watchlist's trend, volatility, breadth
+]
+
+
+def compute_panel_features(prices_by_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """PANEL_FEATURES for every (date, symbol) with a complete feature row.
+
+    Strictly backward-looking: each row uses closes up to its own date only.
+    A stock counts among the peers only on dates where its own features are
+    complete, so a recent listing joins once it has enough history.
+    """
+    parts = []
+    for symbol, prices in prices_by_symbol.items():
+        own = compute_features(prices)
+        own["symbol"] = symbol
+        parts.append(own)
+    panel = pd.concat(parts)
+    panel.index.name = "date"
+    panel = panel.reset_index().dropna(subset=FEATURES)
+    panel = panel[np.isfinite(panel[FEATURES]).all(axis=1)]
+    by_date = panel.groupby("date")
+    panel["xs_r21"] = by_date["r21"].rank(pct=True)
+    panel["xs_r126"] = by_date["r126"].rank(pct=True)
+    panel["xs_vol21"] = by_date["vol21"].rank(pct=True)
+    panel["rel_r5"] = panel["r5"] - by_date["r5"].transform("median")
+    panel["mkt_r21"] = by_date["r21"].transform("median")
+    panel["mkt_vol21"] = by_date["vol21"].transform("median")
+    panel["mkt_breadth"] = (panel["dist_sma200"] > 0).astype(float).groupby(
+        panel["date"]).transform("mean")
+    return panel.set_index(["date", "symbol"]).sort_index()[PANEL_FEATURES]
+
+
+def _sigmoid(z: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -30, 30)))
+
+
+class LogisticModel:
+    """Standardized dot product; parameters exported by ml_rank.py."""
+
+    def __init__(self, m: dict):
+        self.mu = np.array(m["mu"], dtype=float)
+        sigma = np.array(m["sigma"], dtype=float)
+        self.sigma = np.where(sigma == 0, 1.0, sigma)
+        self.coef = np.array(m["coef"], dtype=float)
+        self.intercept = float(m["intercept"])
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return _sigmoid(((X - self.mu) / self.sigma) @ self.coef + self.intercept)
+
+
+class TreeEnsembleModel:
+    """Gradient-boosted trees, trained with LightGBM and exported as node arrays.
+
+    Pure numpy, so the Lambda needs no ML library. Each tree is evaluated for
+    every row at once: rows step one level down per pass (value <= threshold
+    goes left) until all of them reach a leaf. The leaf values of all trees
+    add up to a log-odds score, exactly as in LightGBM's binary objective.
+    """
+
+    def __init__(self, m: dict):
+        self.trees = [{k: np.asarray(tree[k]) for k in ("feature", "threshold", "left", "right",
+                                                        "value")} for tree in m["trees"]]
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        raw = np.zeros(len(X))
+        rows = np.arange(len(X))
+        for tree in self.trees:
+            node = np.zeros(len(X), dtype=int)
+            while True:
+                feature = tree["feature"][node]
+                inner = feature >= 0  # leaves are marked with feature -1
+                if not inner.any():
+                    break
+                at = node[inner]
+                go_left = X[rows[inner], feature[inner]] <= tree["threshold"][at]
+                node[inner] = np.where(go_left, tree["left"][at], tree["right"][at])
+            raw += tree["value"][node]
+        return _sigmoid(raw)
+
+
+MODEL_TYPES = {"logistic_regression": LogisticModel, "gradient_boosted_trees": TreeEnsembleModel}
+
+
+class MLRanker:
+    """Hold the `top_n` stocks a model ranks most likely to beat their peers.
+
+    Ranking uses each stock's average predicted probability over the last
+    `smooth` sessions, which keeps one noisy day from replacing a holding.
+    Only stocks with a prediction on the latest session are eligible. Always
+    fully invested in its picks: it tests stock selection, not market timing.
+    """
+
+    cross_sectional = True
+
+    def __init__(self, model_file: str, name: str, top_n: int = 5, smooth: int = 5,
+                 model_dir: str | None = None):
+        directory = model_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+        with open(os.path.join(directory, model_file)) as fh:
+            m = json.load(fh)
+        if m.get("features") != PANEL_FEATURES:
+            raise ValueError(f"{model_file}: features don't match strategies.PANEL_FEATURES; retrain")
+        if m.get("type") not in MODEL_TYPES:
+            raise ValueError(f"{model_file}: unknown model type {m.get('type')!r}")
+        self.model = MODEL_TYPES[m["type"]](m)
+        self.meta, self.name = m, name
+        self.top_n, self.smooth = top_n, smooth
+
+    def probabilities(self, prices_by_symbol: dict[str, pd.DataFrame]) -> pd.Series:
+        panel = compute_panel_features(prices_by_symbol)
+        return pd.Series(self.model.predict(panel.to_numpy(dtype=float)), index=panel.index)
+
+    def scores(self, prices_by_symbol: dict[str, pd.DataFrame]) -> pd.Series:
+        p = self.probabilities(prices_by_symbol)
+        if p.empty:
+            return p
+        dates = p.index.get_level_values("date")
+        recent = sorted(dates.unique())[-self.smooth:]
+        eligible = set(p[dates == recent[-1]].index.get_level_values("symbol"))
+        mean = p[dates.isin(recent)].groupby(level="symbol").mean()
+        return mean[mean.index.isin(eligible)]
+
+    def universe_signals(self, prices_by_symbol: dict[str, pd.DataFrame]) -> dict[str, int]:
+        ranked = sorted(self.scores(prices_by_symbol).items(), key=lambda kv: (-kv[1], kv[0]))
+        held = {symbol for symbol, _ in ranked[:self.top_n]}
+        return {symbol: int(symbol in held) for symbol in prices_by_symbol}
+
+
+class BufferedRotation:
+    """Rotation with a buffer: buy into the top `top_n` by trailing return,
+    and keep a holding until it falls below rank `keep_until`.
+
+    Plain top-3 rotation swapped names whenever 3rd and 4th place traded
+    spots, which in the 2012-2026 backtest on the 50-stock list meant 48x
+    annual turnover. Entering at 5 but exiting only below 10 cut that to 9x
+    with about the same return, a smaller worst drawdown (-36% vs -46%) and
+    a positive worst year (+1% vs -18%).
+
+    Unlike every other strategy here this one depends on what it held
+    yesterday, so it is `stateful`: callers pass the previous session's
+    holdings, and without them it starts fresh from the current top_n.
+    """
+
+    cross_sectional = True
+    stateful = True
+
+    def __init__(self, lookback: int = 126, top_n: int = 5, keep_until: int = 10):
+        self.lookback, self.top_n, self.keep_until = lookback, top_n, keep_until
+        self.name = f"xsmom_{lookback}_top{top_n}_keep{keep_until}"
+
+    def universe_signals(self, prices_by_symbol: dict[str, pd.DataFrame],
+                         previous: set[str] | None = None) -> dict[str, int]:
+        scores = CrossSectionalMomentum(self.lookback).scores(prices_by_symbol)
+        order = sorted(scores, key=lambda s: (-scores[s], s))
+        rank = {s: i + 1 for i, s in enumerate(order)}
+        kept = sorted((s for s in (previous or set()) if rank.get(s, len(rank) + 1) <= self.keep_until),
+                      key=rank.get)
+        held = set(kept[:self.top_n])  # never more holdings than slots, best-ranked first
+        for s in order:
+            if len(held) >= self.top_n:
+                break
+            held.add(s)
+        return {s: int(s in held) for s in prices_by_symbol}
+
+
+class BreadthFilter:
+    """Hold every stock equally while more than `threshold` of them trade
+    above their `window`-day average; otherwise hold cash.
+
+    The only book that times the whole market instead of picking stocks.
+    In the 2012-2026 backtest it had the best risk-adjusted return of the
+    books tested (Sharpe 1.22) and halved holding everything's worst
+    drawdown (-18% vs -36%). Its weakness is whipsaw: a signal flipping
+    near the threshold can sell low and buy back higher (worst year -16%).
+    """
+
+    cross_sectional = True
+    top_n = 10**9  # one equal slot per stock in the universe
+
+    def __init__(self, window: int = 200, threshold: float = 0.5):
+        self.window, self.threshold = window, threshold
+        self.name = f"breadth_all_sma{window}_gt{int(threshold * 100)}"
+
+    def breadth(self, prices_by_symbol: dict[str, pd.DataFrame]) -> float:
+        above = [bool(px["close"].iloc[-1] > px["close"].iloc[-self.window:].mean())
+                 for px in prices_by_symbol.values() if len(px) >= self.window]
+        return sum(above) / len(above) if above else 0.0
+
+    def universe_signals(self, prices_by_symbol: dict[str, pd.DataFrame]) -> dict[str, int]:
+        on = int(self.breadth(prices_by_symbol) > self.threshold)
+        return {s: on for s in prices_by_symbol}
+
+
 REGISTRY = {
     "buyhold": BuyAndHold,
     "dualmom": lambda: CrossSectionalMomentum(absolute_filter=True),
@@ -409,5 +613,7 @@ REGISTRY = {
     "voltarget": VolTargetMomentum,
     "ml": MLStrategy,
     "xsmom": CrossSectionalMomentum,
+    "xsmom_buffered": BufferedRotation,
+    "breadth": BreadthFilter,
     "ensemble": Ensemble,
 }

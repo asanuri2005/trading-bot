@@ -32,23 +32,26 @@ def get_watchlist() -> list[str]:
 
 
 def get_lineup():
-    """The complete seven-book comparison, using the backtester's classes.
+    """The complete eight-book comparison, using the backtester's classes.
 
-    Six active strategies run beside an explicit buy-and-hold reference.
+    Seven active strategies run beside an explicit buy-and-hold reference.
     Every strategy, including ML, is required: a failed model load prevents
     the complete daily batch from being published. `make sync` copies the
-    frozen models/logreg.json into the Lambda bundle without retraining it.
+    frozen model files into the Lambda bundle; ml_rank.py --export makes them.
     """
-    from strategies import (BuyAndHold, CrossSectionalMomentum, Ensemble,
-                            MLStrategy, RSIMeanReversion, TimeSeriesMomentum)
+    from strategies import (BreadthFilter, BufferedRotation, BuyAndHold, Ensemble,
+                            MLRanker, RSIMeanReversion, TimeSeriesMomentum)
 
     lineup = [
         TimeSeriesMomentum(126),
         RSIMeanReversion(),
-        CrossSectionalMomentum(top_n=3),
-        CrossSectionalMomentum(top_n=3, absolute_filter=True),
+        BufferedRotation(top_n=5, keep_until=10),
+        BreadthFilter(),
         Ensemble(),
-        MLStrategy(),
+        # Two stock-picking models trained on the same features and labels:
+        # logistic regression is the baseline the trees have to beat.
+        MLRanker("ml_logreg_v2.json", name="ml_logreg", top_n=5),
+        MLRanker("ml_gbt.json", name="ml_gbt", top_n=5),
         BuyAndHold(),
     ]
     return lineup

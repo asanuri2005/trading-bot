@@ -14,10 +14,15 @@ def positive(value):
     return math.isfinite(float(value)) and float(value) > 0
 
 
-def weights_for(strategy, frames):
+def weights_for(strategy, frames, previous=None):
+    """Target weights for one book. `previous` is the book's holdings from the
+    last session, passed only to strategies marked `stateful`."""
     if not frames:
         raise ValueError("empty universe")
-    if getattr(strategy, "cross_sectional", False):
+    if getattr(strategy, "stateful", False):
+        signals = strategy.universe_signals(frames, previous=previous)
+        slots = min(strategy.top_n, len(frames))
+    elif getattr(strategy, "cross_sectional", False):
         signals = strategy.universe_signals(frames)
         slots = min(strategy.top_n, len(frames))
     else:

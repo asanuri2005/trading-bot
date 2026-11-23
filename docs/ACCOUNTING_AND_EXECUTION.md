@@ -177,3 +177,43 @@ Shadow-ledger accounting is unchanged; these affect broker execution only.
   remainder is kept and reported. Sub-share remainders no longer count as
   unmanaged holdings. Spin-offs and symbol changes, which create holdings
   under a new ticker, are still reported as unmanaged and pause execution.
+
+## Version 2 — November 23, 2026 (experiment `v2-20261123`)
+
+A new experiment, in a new Alpaca paper account starting at $100,000. The
+September experiment's records remain in DynamoDB under `cash-v2-20260911`.
+
+- **Universe.** 50 halal-screened stocks across nine sectors, chosen from the
+  halal.sh triple-screened list: plainly "Compliant" only (none flagged Near
+  Limit or Borderline), tradable and fractionable on Alpaca, 210+ sessions of
+  history. MU and WELL left the screen and were removed; FCX and CEG were
+  dropped as Near Limit.
+- **Fractional shares.** Broker lots are sized exactly (to 0.0001 share) for
+  every asset that allows fractional orders; others fall back to whole shares.
+  Adjustments under $5 are skipped; closing a position always sells all of it.
+- **Lineup, eight books.** Dual momentum was dropped: over 2012–2026 on the new
+  universe it held something different from Rotation on 0.1% of days. Rotation
+  top-3 became *Rotation top-5, keep until 10th* (backtest: turnover 48x → 9x a
+  year, worst drawdown −46% → −36%, similar return). *Hold all, breadth
+  filter* was added (backtest Sharpe 1.22, the best tested). The buffered
+  rotation is the first stateful book: it receives its previous-session
+  holdings from the stored RUN and starts fresh without one.
+- **ML books.** Both models now rank stocks by the probability of beating the
+  watchlist median over 5 sessions and hold the top 5, averaging each stock's
+  probability over 5 sessions. Twenty features: the original thirteen plus
+  cross-sectional ranks and watchlist-wide trend, volatility and breadth.
+  Logistic regression is the baseline; gradient-boosted trees (LightGBM,
+  fixed hyperparameters) are evaluated against it. Walk-forward results,
+  2012–2026: both rank with statistically real skill (IC t-stats 3.3 and 5.6),
+  but neither beat holding all 50 on Sharpe (0.96 and 0.92 vs 1.16), and the
+  trees did not beat logistic regression on return (26.1% vs 29.8% a year).
+  Both turn over about 75 times a year.
+- **Scale.** Latest prices come from one batch request, and the Alpaca client
+  paces itself below 180 requests a minute. A 50-stock signal run takes about
+  7 seconds and 52 requests.
+- **Dashboard.** The order table shows only orders from the current
+  experiment; the eighth book takes a validated violet series color.
+
+All backtests above use stocks selected in 2026 for being healthy and
+compliant now, so they are flattered by hindsight.
+

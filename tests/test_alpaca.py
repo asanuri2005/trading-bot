@@ -83,5 +83,21 @@ class RetryTests(unittest.TestCase):
         self.sleep.assert_not_called()
 
 
+class PacingTests(unittest.TestCase):
+    def test_waits_when_a_minute_holds_the_limit(self):
+        from shared import alpaca
+        client = Alpaca("key", "secret")
+        clock = [1000.0]
+        monotonic = patch("shared.alpaca.time.monotonic", side_effect=lambda: clock[0])
+        with monotonic, patch("shared.alpaca.time.sleep") as sleep:
+            for _ in range(alpaca.REQUESTS_PER_MINUTE):
+                client._pace()
+                clock[0] += 0.1
+            sleep.assert_not_called()
+            client._pace()  # one over the limit inside the same minute
+        waited = sleep.call_args[0][0]
+        self.assertAlmostEqual(waited, 60 - alpaca.REQUESTS_PER_MINUTE * 0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

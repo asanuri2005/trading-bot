@@ -5,6 +5,7 @@ Alpaca's v2 APIs; verify against https://docs.alpaca.markets if they drift.
 """
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import json
 import time
@@ -18,6 +19,11 @@ DATA_BASE = "https://data.alpaca.markets"
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 RETRY_DELAYS_S = (1, 3)  # waits before the second and third attempts of a read
 
+# Alpaca allows about 200 requests a minute. With ~50 tickers a busy
+# rebalance day comes close, so the client paces itself below that and
+# waits for room instead of collecting 429s.
+REQUESTS_PER_MINUTE = 180
+
 
 class AlpacaError(RuntimeError):
     def __init__(self, message, status=None):
@@ -30,6 +36,16 @@ class Alpaca:
                  trading_base: str = TRADING_PAPER, data_base: str = DATA_BASE):
         self.key_id, self.secret = key_id, secret
         self.trading_base, self.data_base = trading_base, data_base
+        self._sent = collections.deque()  # monotonic times of recent requests
+
+    def _pace(self):
+        now = time.monotonic()
+        while self._sent and now - self._sent[0] >= 60:
+            self._sent.popleft()
+        if len(self._sent) >= REQUESTS_PER_MINUTE:
+            time.sleep(60 - (now - self._sent[0]))
+            self._sent.popleft()
+        self._sent.append(time.monotonic())
 
     # ------------------------------------------------------------ plumbing
     def _request(self, base: str, method: str, path: str,
@@ -54,6 +70,7 @@ class Alpaca:
         attempts = len(RETRY_DELAYS_S) + 1 if method == "GET" else 1
         for attempt in range(attempts):
             last = attempt == attempts - 1
+            self._pace()
             try:
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     payload = resp.read().decode()
@@ -119,6 +136,19 @@ class Alpaca:
     def latest_trade(self, symbol):
         return self._request(self.data_base, "GET", f"/v2/stocks/{symbol}/trades/latest",
                              {"feed": "iex"})["trade"]
+
+    def latest_trades(self, symbols) -> dict:
+        """{symbol: latest trade} in one request per 100 symbols.
+
+        A symbol with no recent trade is simply absent from the result.
+        """
+        symbols, trades = sorted(set(symbols)), {}
+        for i in range(0, len(symbols), 100):
+            chunk = ",".join(symbols[i:i + 100])
+            resp = self._request(self.data_base, "GET", "/v2/stocks/trades/latest",
+                                 {"symbols": chunk, "feed": "iex"})
+            trades.update(resp.get("trades") or {})
+        return trades
 
     def account(self) -> dict:
         return self._request(self.trading_base, "GET", "/v2/account")

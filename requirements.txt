@@ -2,3 +2,5 @@ pandas>=2.0
 numpy
 matplotlib
 yfinance
+lightgbm==4.6.0
+scikit-learn==1.8.0  # LightGBM's LGBMClassifier, used by ml_rank.py training only

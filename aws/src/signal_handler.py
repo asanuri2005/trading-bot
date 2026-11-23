@@ -17,7 +17,6 @@ written once (RUN#<experiment>/<date>); a rerun returns it unchanged.
 """
 import datetime as dt
 import json
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -48,6 +47,7 @@ def lambda_handler(event, context):
     symbols = sorted(set(runtime.get_watchlist()))
     if not symbols:
         raise ValueError("empty watchlist")
+    todays = _prices_today(alpaca, symbols, date)
     frames, late, prior_close = {}, [], []
     for symbol in symbols:
         frame, through = _frame(alpaca.daily_bars(symbol), symbol, previous_date)
@@ -56,7 +56,7 @@ def lambda_handler(event, context):
                 raise ValueError(f"{symbol}: incomplete history for {previous_date}; "
                                  "no batch published")
             late.append(symbol)
-        price = _price_today(alpaca, symbol, date)
+        price = todays.get(symbol)
         if price is None:
             prior_close.append(symbol)
         else:
@@ -72,16 +72,25 @@ def lambda_handler(event, context):
 
     # The settings that define the experiment, frozen on its first run.
     # Changing any of them needs a new EXPERIMENT_ID so results stay comparable.
-    model = Path(__file__).parent / "models" / "logreg.json"
+    # model_hash fingerprints every model the lineup loaded, so swapping or
+    # retraining one also demands a new experiment.
+    models = {s.name: s.meta for s in lineup if hasattr(s, "meta")}
     config = dict(universe=symbols, budget=budget, cost_bps=cost_bps,
                   strategies=[s.name for s in lineup],
-                  model_hash=exp.digest(model.read_text()), accounting_version=2)
+                  model_hash=exp.digest(models), accounting_version=3)
     if exp.put_once(table, "CONFIG", "settings", config) != config:
         raise ValueError("Experiment settings changed. Use a new EXPERIMENT_ID.")
 
     targets, books = [], {}
+    # Stateful books (the buffered rotation) continue from what they held in
+    # the previous session's batch; without one they start fresh.
+    prior = exp.get(table, "RUN", previous_date)
     for strategy in lineup:
-        weights = portfolio.weights_for(strategy, frames)
+        held = None
+        if prior and getattr(strategy, "stateful", False):
+            weights = prior["books"].get(strategy.name, {}).get("weights", {})
+            held = {s for s, w in weights.items() if w > 0}
+        weights = portfolio.weights_for(strategy, frames, previous=held)
         books[strategy.name] = dict(weights=weights,
                                     buy_and_hold=getattr(strategy, "buy_and_hold", False))
         for symbol, weight in weights.items():
@@ -105,26 +114,29 @@ def lambda_handler(event, context):
     return {"run_id": saved["run_id"], "targets": saved["targets"]}
 
 
-def _price_today(alpaca, symbol, date):
-    """The latest trade from today's session in New York, or None without one.
+def _prices_today(alpaca, symbols, date):
+    """{symbol: latest trade price} for symbols that have traded today in New York.
 
-    A trade from an earlier day is not today's price, so it is not used. On an
-    early-close day the last trade is that session's close, which is correct.
-    A failed request also returns None: the ticker then decides on its prior
-    close and is listed in the batch, rather than the whole batch failing.
+    One request for the whole watchlist. A trade from an earlier day is not
+    today's price, so it is left out; on an early-close day the last trade is
+    that session's close, which is correct. If the request fails, every
+    ticker decides on its prior close and is listed in the batch, rather than
+    the whole batch failing.
     """
     try:
-        trade = alpaca.latest_trade(symbol)
-        traded_at = dt.datetime.fromisoformat(str(trade["t"]).replace("Z", "+00:00"))
+        trades = alpaca.latest_trades(symbols)
     except Exception as exc:
-        print(json.dumps({"event": "no_price_today", "symbol": symbol,
-                          "error_type": type(exc).__name__}))
-        return None
-    if traded_at.astimezone(NEW_YORK).date().isoformat() != date:
-        return None
-    if not portfolio.positive(trade["p"]):
-        return None
-    return float(trade["p"])
+        print(json.dumps({"event": "no_prices_today", "error_type": type(exc).__name__}))
+        return {}
+    prices = {}
+    for symbol, trade in trades.items():
+        try:
+            traded_at = dt.datetime.fromisoformat(str(trade["t"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if traded_at.astimezone(NEW_YORK).date().isoformat() == date and portfolio.positive(trade["p"]):
+            prices[symbol] = float(trade["p"])
+    return prices
 
 
 def _frame(bars, symbol, through):
@@ -138,3 +150,4 @@ def _frame(bars, symbol, through):
             or not frame["close"].map(portfolio.positive).all()):
         raise ValueError(f"{symbol}: invalid bars")
     return frame, str(usable[-1]["t"])[:10]
+

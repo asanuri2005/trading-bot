@@ -2,7 +2,7 @@
 
 ## Three parts
 
-The research tools replay trading rules on historical prices. The AWS functions collect daily signals, reconcile an Alpaca paper portfolio, and value seven simulated books. The React dashboard displays the published comparison and broker order records.
+The research tools replay trading rules on historical prices. The AWS functions collect daily signals, reconcile an Alpaca paper portfolio, and value eight simulated books. The React dashboard displays the published comparison and broker order records.
 
 For a quick look, follow the [account-free dashboard setup](README.md#try-it-without-accounts). For technical details, read [the accounting and execution review](docs/ACCOUNTING_AND_EXECUTION.md).
 
@@ -10,7 +10,7 @@ For a quick look, follow the [account-free dashboard setup](README.md#try-it-wit
 
 Each book begins with $12,000. Its equity is cash plus the value of its synthetic holdings; its cumulative percentage is equity / $12,000 - 1. The leaderboard and chart legend rank that percentage. A difference between two returns is measured in **percentage points**.
 
-The cards and chart are simulated books with modeled costs. The account equity and order table come from the combined Alpaca paper account. The six active strategies contribute to that account; buy-and-hold is a reference only. Different sizing, prices, and execution timing mean the simulated and broker results will differ.
+The cards and chart are simulated books with modeled costs. The account equity and order table come from the combined Alpaca paper account. The seven active strategies contribute to that account, in fractional shares; buy-and-hold is a reference only. Different sizing, prices, and execution timing mean the simulated and broker results will differ.
 
 The page fetches its data file every minute, but the reporter normally publishes once after the market closes. A refreshed page does not imply new market data. `?sample=1` explicitly selects fictional local sample data; it never falls back to sample data after a live fetch failure.
 
@@ -24,8 +24,7 @@ Use Python 3.12 for the Lambda build, Node.js 22, AWS CLI v2, and AWS SAM CLI. T
 4. Copy the shared code and model into the Lambda package:
 
 ```bash
-cp strategies.py aws/src/strategies.py
-cp models/logreg.json aws/src/models/logreg.json
+make sync   # copies strategies.py and models/ml_*.json into aws/src
 cd aws
 sam build
 sam deploy --guided
@@ -63,7 +62,7 @@ Old experiment history is retained. Do not delete an inconvenient first day to i
 
 ## ML development
 
-`models/logreg.json` is the frozen model used for inference, with a matching copy under `aws/src/models/`. Running `ml_train.py` writes a separate candidate by default. It does not replace the deployed model or alter the paper experiment.
+The two ML books load `models/ml_logreg_v2.json` and `models/ml_gbt.json`, with matching copies under `aws/src/models/` (CI checks they match). `ml_rank.py` evaluates both walk-forward and, with `--export`, rewrites them. Exporting does not deploy anything; the experiment's frozen model hash means a retrained model only goes live with a new experiment ID. `ml_train.py` and `models/logreg.json` are the original single-stock model, kept for reference.
 
 Compare candidates on common unseen dates and account for modeled costs, idle cash, drawdowns, and missing predictions. A better result on one asset or period is not enough to establish a robust improvement. Promotion should be explicit, with the artifact copied into the package, tests rerun, and a new experiment ID chosen.
 
