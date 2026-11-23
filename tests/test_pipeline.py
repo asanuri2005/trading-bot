@@ -1,5 +1,6 @@
 import copy
 import datetime as dt
+from decimal import Decimal
 import json
 import os
 from pathlib import Path
@@ -425,6 +426,77 @@ class PipelineTests(unittest.TestCase):
         orders = self._trade_two_days(26.0)  # +30%: positions now well above target
         self.assertTrue(orders)
         self.assertTrue(all(o["side"] == "sell" for o in orders))
+
+
+    # ---- corporate actions: stock dividends leave fractional shares
+
+    def _fractionable(self, value):
+        return patch.object(self.broker, "asset", side_effect=lambda s: dict(
+            symbol=s, status="active", tradable=True, fractionable=value))
+
+    def _hold_with_stock_dividend(self):
+        # SCCO, November 2026: 10 shares plus a 1.06% stock dividend = 10.106.
+        self.broker.pos = {"A": Decimal("10.106")}
+        state.put_bot_position(self.table, "A", 10, "2026-08-07")
+
+    def test_stock_dividend_remainder_is_sold_and_trading_continues(self):
+        self.signal()
+        self._hold_with_stock_dividend()
+        with patch.dict(os.environ, {"DRY_RUN": "false"}), self._fractionable(True):
+            result = self.execute()  # previously raised "unsupported fractional holding"
+        self.assertNotIn("skipped", result)
+        remainder = [o for o in self.broker.orders if o["qty"] == Decimal("0.106")]
+        self.assertEqual(len(remainder), 1)
+        self.assertEqual(remainder[0]["side"], "sell")
+        self.assertTrue(any(o["qty"] >= 1 for o in self.broker.orders))
+        self.assertEqual(self.broker.pos["A"], int(self.broker.pos["A"]))
+        json.dumps(result)  # fractional quantities must still serialise for the log
+
+    def test_remainder_of_non_fractionable_asset_is_kept_and_reported(self):
+        self.signal()
+        self._hold_with_stock_dividend()
+        with patch.dict(os.environ, {"DRY_RUN": "false"}), self._fractionable(False):
+            result = self.execute()
+        self.assertIn({"symbol": "A", "waiting": "fractional remainder 0.106 kept: "
+                       "asset does not allow fractional orders"}, result["actions"])
+        self.assertFalse(any(o["qty"] != int(o["qty"]) for o in self.broker.orders))
+        self.assertTrue(self.broker.orders)
+
+    def test_sub_share_remainder_is_not_an_unmanaged_position(self):
+        self.signal()
+        self.broker.pos = {"OUTSIDE": Decimal("0.5")}
+        with patch.dict(os.environ, {"DRY_RUN": "false"}):
+            result = self.execute()
+        self.assertNotIn("skipped", result)
+        self.assertNotIn("OUTSIDE", {o["symbol"] for o in self.broker.orders})
+
+    # ---- signals decide on today's price near the close
+
+    def test_signal_uses_todays_price_near_the_close(self):
+        trade = {"p": 25.0, "t": "2026-08-10T19:39:00Z"}  # 15:39 New York time
+        with patch.object(self.broker, "latest_trade", return_value=trade):
+            self.signal()
+        run = exp.get(self.table, "RUN", exp.today())
+        self.assertEqual(run["signal_timing"], "near_close")
+        self.assertNotIn("prior_close_symbols", run)
+        self.assertTrue(all(t["price"] == 25.0 for t in run["targets"]))
+
+    def test_ticker_without_a_trade_today_decides_on_its_prior_close(self):
+        yesterday = {"p": 25.0, "t": "2026-08-07T19:59:00Z"}
+        with patch.object(self.broker, "latest_trade", return_value=yesterday):
+            self.signal()
+        run = exp.get(self.table, "RUN", exp.today())
+        self.assertEqual(run["prior_close_symbols"], ["A", "B", "C", "D"])
+        last_close = next(b["c"] for b in self.broker.bars["A"] if b["t"][:10] == "2026-08-07")
+        self.assertTrue(any(t["symbol"] == "A" and t["price"] == last_close
+                            for t in run["targets"]))
+
+    def test_price_request_failure_falls_back_instead_of_failing_the_batch(self):
+        with patch.object(self.broker, "latest_trade", side_effect=TimeoutError("data API down")):
+            self.signal()
+        run = exp.get(self.table, "RUN", exp.today())
+        self.assertEqual(len(run["targets"]), 28)
+        self.assertEqual(run["prior_close_symbols"], ["A", "B", "C", "D"])
 
 
 class SizeLotsTests(unittest.TestCase):

@@ -57,14 +57,17 @@ def unresolved_intents(table):
             if str(i.get("pk", "")).startswith("INTENT#") and not i.get("reconciled")]
 
 
-def record_trade(table, symbol: str, side: str, qty: int,
+def record_trade(table, symbol: str, side: str, qty,
                  order: dict, ts: str, price: float = 0.0) -> None:
-    """Store the latest observation of a broker order, keyed by its stable ID."""
+    """Store the latest observation of a broker order, keyed by its stable ID.
+
+    `qty` may be fractional: remainders from stock dividends are sold as such.
+    """
     table.put_item(Item={
         "pk": f"ORDER#{order['id']}", "sk": "latest",
         "submitted_at": str(order.get("submitted_at") or ts),
         "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "symbol": symbol, "side": side, "qty": int(qty),
+        "symbol": symbol, "side": side, "qty": Decimal(str(qty)),
         "price": Decimal(str(round(price, 4))),
         "order_id": str(order.get("id", "")),
         "status": str(order.get("status", "")),
@@ -121,12 +124,12 @@ def refresh_orders(alpaca, table):
     for intent in unresolved_intents(table):
         order = alpaca.order_by_client_id(str(intent["pk"]).split("#", 1)[1])
         if order:
-            record_trade(table, order["symbol"], order["side"], int(order["qty"]),
+            record_trade(table, order["symbol"], order["side"], Decimal(str(order["qty"])),
                          order, str(order["submitted_at"]))
             table.put_item(Item=dict(intent, reconciled=True))
     for item in pending_trades(table):
         order = alpaca.order(str(item["order_id"]))
-        record_trade(table, str(item["symbol"]), str(item["side"]), int(item["qty"]),
+        record_trade(table, str(item["symbol"]), str(item["side"]), Decimal(str(item["qty"])),
                      order, str(item["sk"]), float(item.get("price", 0)))
 
 

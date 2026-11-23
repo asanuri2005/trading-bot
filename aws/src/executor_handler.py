@@ -15,10 +15,18 @@ York time. Checks, in the order they run:
 A saved plan and deterministic client order IDs make a retry reuse earlier
 orders instead of duplicating them, including after an HTTP response is lost.
 Only confirmed broker positions update BOTPOS.
+
+The plan works in whole shares, but corporate actions can leave fractions:
+a stock dividend paid in shares (SCCO, November 2026: 0.106 extra shares on
+10) or a split with an uneven ratio. The bot manages the whole-share part and
+sells any fractional remainder of a name it holds, when the asset supports
+fractional orders; otherwise the remainder is left in place and reported.
+Remainders under one share never count as unmanaged holdings.
 """
 import datetime as dt
 import json
 import math
+from decimal import Decimal
 
 from shared import experiment as exp, portfolio, runtime, state
 
@@ -57,16 +65,27 @@ def _log(result):
     return result
 
 
+def _qty(value):
+    """A quantity for logs and JSON: an int for whole shares, else a float."""
+    return int(value) if value == int(value) else float(value)
+
+
 def reconcile(alpaca, table):
-    """Refresh order states, then sync BOTPOS to the broker's real holdings."""
+    """Refresh order states, then sync BOTPOS to the broker's real holdings.
+
+    Returns each symbol's quantity exactly as the broker reports it, as a
+    Decimal so a fractional remainder like 6.106 is not rounded. BOTPOS keeps
+    the whole-share count, and is kept while any fraction remains so the bot
+    still treats the name as its own and can sell the remainder.
+    """
     state.refresh_orders(alpaca, table)
-    positions = {p["symbol"]: float(p["qty"]) for p in alpaca.positions()}
+    positions = {p["symbol"]: Decimal(str(p["qty"])) for p in alpaca.positions()}
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     for symbol in set(state.get_bot_symbols(table)):
-        qty = float(positions.get(symbol, 0))
-        if qty < 0 or not qty.is_integer():
-            raise ValueError(f"{symbol}: unsupported short/fractional broker holding")
-        if qty:
+        qty = positions.get(symbol, Decimal(0))
+        if qty < 0:
+            raise ValueError(f"{symbol}: unsupported short broker holding")
+        if qty > 0:
             state.put_bot_position(table, symbol, int(qty), now)
         else:
             state.delete_bot_position(table, symbol)
@@ -104,7 +123,9 @@ def _execute():
             or account.get("account_blocked") or account.get("trade_suspended_by_user")):
         return skip("account not available for trading")
     managed = set(state.get_bot_symbols(table))
-    if any(qty and symbol not in managed for symbol, qty in held.items()):
+    # A sub-share remainder is not someone else's position; ignoring it is safe
+    # because the bot only ever trades a remainder in a name it manages.
+    if any(symbol not in managed and (qty < 0 or qty >= 1) for symbol, qty in held.items()):
         return skip("unmanaged broker positions; dedicated account required")
 
     # Spend cash only, never margin buying power.
@@ -117,12 +138,13 @@ def _execute():
         raise ValueError("invalid order cap")
 
     symbols = sorted(set(run["config"]["universe"]) | managed)
-    prices, waiting = {}, {}
+    prices, waiting, fractionable = {}, {}, {}
     for symbol in symbols:
-        holding = float(held.get(symbol, 0))
-        if holding < 0 or not holding.is_integer():
-            raise ValueError(f"{symbol}: unsupported broker holding")
-        price, problem = _execution_price(alpaca, symbol)
+        if held.get(symbol, 0) < 0:
+            raise ValueError(f"{symbol}: unsupported short broker holding")
+        asset = alpaca.asset(symbol)
+        fractionable[symbol] = bool(asset.get("fractionable"))
+        price, problem = _execution_price(alpaca, symbol, asset)
         if problem:
             waiting[symbol] = problem
         else:
@@ -146,20 +168,36 @@ def _execute():
             date=date, run_id=run["run_id"], desired=desired, lots=lots))
 
     actions = [{"symbol": s, "waiting": why} for s, why in waiting.items()]
+    orders = []  # (symbol, side, qty, is_remainder)
+    for symbol, qty in plan["desired"].items():
+        if symbol not in prices:
+            continue
+        delta = int(qty) - int(held.get(symbol, 0))  # whole shares only
+        if delta:
+            orders.append((symbol, "buy" if delta > 0 else "sell", Decimal(abs(delta)), False))
+    for symbol in sorted(set(held) & managed & set(prices)):
+        remainder = held[symbol] - int(held[symbol])
+        if not remainder:
+            continue
+        if fractionable[symbol]:
+            orders.append((symbol, "sell", remainder, True))
+        else:
+            actions.append({"symbol": symbol, "waiting": f"fractional remainder "
+                            f"{_qty(remainder)} kept: asset does not allow fractional orders"})
+
     # Sells go first. Their proceeds are not spent in this invocation: the
     # broker reports that cash on a later run, so buys draw only on `cash`.
-    changes = [(symbol, int(qty) - int(held.get(symbol, 0)))
-               for symbol, qty in plan["desired"].items() if symbol in prices]
-    for symbol, delta in sorted(changes, key=lambda change: (change[1] > 0, change[0])):
-        if not delta:
-            continue
-        side, qty = ("buy" if delta > 0 else "sell"), abs(delta)
-        notional = qty * prices[symbol] * PRICE_BUFFER
-        client_id = "bot-" + exp.digest(
-            [exp.experiment_id(), plan["run_id"], symbol, side])[:36]
+    for symbol, side, qty, is_remainder in sorted(
+            orders, key=lambda order: (order[1] == "buy", order[0], order[3])):
+        notional = float(qty) * prices[symbol] * PRICE_BUFFER
+        # A remainder sale gets its own ID; whole-share IDs are unchanged.
+        identity = [exp.experiment_id(), plan["run_id"], symbol, side]
+        if is_remainder:
+            identity.append("remainder")
+        client_id = "bot-" + exp.digest(identity)[:36]
         order = None if dry_run else alpaca.order_by_client_id(client_id)
         if order:  # placed by an earlier invocation today: record it, never resubmit
-            state.record_trade(table, symbol, side, int(order["qty"]), order,
+            state.record_trade(table, symbol, side, Decimal(str(order["qty"])), order,
                                str(order.get("submitted_at") or run["ts"]), prices[symbol])
             actions.append({"symbol": symbol, "status": order["status"], "reused": True})
             continue
@@ -172,7 +210,7 @@ def _execute():
         if side == "buy":
             cash -= notional
         if dry_run:
-            actions.append({"symbol": symbol, "side": side, "qty": qty, "dry_run": True})
+            actions.append({"symbol": symbol, "side": side, "qty": _qty(qty), "dry_run": True})
             continue
         state.put_intent(table, client_id, symbol)
         # If this raises after the broker accepted the order, the next
@@ -180,16 +218,15 @@ def _execute():
         order = alpaca.submit_order(symbol, qty, side, client_order_id=client_id)
         state.record_trade(table, symbol, side, qty, order,
                            str(order.get("submitted_at") or run["ts"]), prices[symbol])
-        actions.append({"symbol": symbol, "side": side, "qty": qty,
+        actions.append({"symbol": symbol, "side": side, "qty": _qty(qty),
                         "status": order.get("status")})
     if not dry_run:
         reconcile(alpaca, table)
     return {"dry_run": dry_run, "run_id": run["run_id"], "actions": actions}
 
 
-def _execution_price(alpaca, symbol):
+def _execution_price(alpaca, symbol, asset):
     """(price, None) for a tradable symbol, or (None, reason) if it must wait."""
-    asset = alpaca.asset(symbol)
     if asset.get("status") != "active" or not asset.get("tradable"):
         return None, "asset unavailable for trading"
     trade = alpaca.latest_trade(symbol)

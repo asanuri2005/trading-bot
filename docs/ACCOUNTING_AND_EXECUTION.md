@@ -23,8 +23,10 @@ whole shares or verified broker positions. Dividend/split-adjusted price
 ratios represent reinvested total-return approximations; historical adjusted
 prices are reread and units rescaled to preserve value across revisions.
 
-All books rebalance at the session close using signals available from the
-previous session. Old holdings earn the price move before that rebalance.
+All books rebalance at the session close. Until November 20, 2026 signals
+used only the previous session; from November 23 they also use each
+ticker's 15:40 price (see the November 23 revision below). Old holdings earn
+the price move before that rebalance.
 Costs are 5 bps on each buy and sell. Sells precede buys, purchases are scaled
 to remaining cash including costs, and no negative cash/leverage is allowed.
 The snapshot records cash, invested value, equity, costs and returns.
@@ -154,3 +156,24 @@ Shadow-ledger accounting is unchanged; these affect broker execution only.
 - **Reads retry.** Alpaca GET requests make up to three attempts on HTTP 429/5xx
   and network failures. Order submission is never retried; lost responses are
   still recovered by client order ID.
+
+## Execution revision — November 23, 2026
+
+- **Signals decide near the close.** At 15:40 each ticker's frame is its
+  completed daily bars plus its latest trade today, standing in for the close.
+  The executor trades at 15:45 and the shadow books rebalance at the close, so
+  signals act on the same session instead of a day later. A 2010–2026 backtest
+  on the watchlist (5 bps per side) improved every strategy tested: RSI-2
+  Sharpe 0.17 → 0.26, TSMOM 0.72 → 0.75, Donchian 0.61 → 0.69. A ticker with no
+  trade today decides on its prior close and is listed in the RUN under
+  `prior_close_symbols`. The experiment continues: all books switched on the
+  same day, so the comparison between them stays like-for-like, but sessions
+  before and after November 23 use different signal timing.
+- **Fractional shares from corporate actions.** On November 19, SCCO paid a
+  1.06% stock dividend (0.106 shares on 10). The executor treated the
+  fractional holding as an error and stopped trading from November 20. It now
+  manages the whole-share part and sells any remainder in a name it holds when
+  the asset allows fractional orders (all 12 current tickers do); otherwise the
+  remainder is kept and reported. Sub-share remainders no longer count as
+  unmanaged holdings. Spin-offs and symbol changes, which create holdings
+  under a new ticker, are still reported as unmanaged and pause execution.
